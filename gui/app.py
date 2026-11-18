@@ -12,11 +12,13 @@ from gui.views.dominancy_checker_view import DominancyCheckerView
 from gui.views.response_checker_view import ResponseCheckerView
 from gui.views.live_checker_view import LiveCheckerView
 from gui.views.script_view import ScriptView
+from gui.views.guide_view import GuideView
 from gui.ui_helpers import start_ui_pump
 
 # (key, icon, label, view class). Settings is pinned to the bottom.
 NAV_ITEMS = (
     ("home", "⌂", "Home", HomeView),
+    ("guide", "✓", "Getting Started", GuideView),
     ("fb_listing", "▤", "FB Listings", FBListingView),
     ("dominancy", "◎", "Dominancy Checker", DominancyCheckerView),
     ("response", "✉", "Response Checker", ResponseCheckerView),
@@ -213,6 +215,7 @@ class App(ctk.CTk):
     def show_response_view(self): self.show("response")
     def show_live_view(self): self.show("live")
     def show_script_view(self): self.show("script")
+    def show_guide_view(self): self.show("guide")
     def show_settings_view(self): self.show("settings")
 
     def toggle_sidebar(self):
