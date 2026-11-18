@@ -804,6 +804,55 @@ def read_first_listings(page, sleep, log, with_details=True):
 
 # --- Older UI (/marketplace/you/selling cards) -----------------------------
 
+# How long to wait for a lazy-loading feed to add more cards after a scroll. Three browsers on one
+# connection can take several seconds per batch, and a scan that gives up early reports a shorter
+# account as if it were complete (the same profile read 38, 18 and 28 listings in one afternoon).
+FEED_GROWTH_WINDOW = 4.0
+FEED_FIRST_CARD_WAIT_MS = 8000
+
+_OLD_MARKER_COUNT_JS = r"""
+() => document.querySelectorAll('[aria-label^="More options for "]').length
+"""
+
+_FEED_SPINNER_JS = r"""
+() => Array.from(document.querySelectorAll('[role="progressbar"], [aria-busy="true"]')).some((el) => {
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+})
+"""
+
+_SCROLL_OLD_FEED_JS = r"""
+([section, toBottom]) => {
+  const cards = Array.from(document.querySelectorAll('[data-lp-card]'))
+      .filter(n => (n.getAttribute('data-lp-card') || '').startsWith(section + '-'));
+  const last = cards[cards.length - 1];
+  const before = window.scrollY;
+  if (toBottom) { window.scrollTo(0, document.documentElement.scrollHeight); return; }
+  if (last) last.scrollIntoView({block: 'end'});
+  // Bring the "load more" area below the last card into view as well.
+  window.scrollBy(0, 300);
+  if (window.scrollY === before) window.scrollBy(0, Math.max(200, innerHeight * 0.8));
+}
+"""
+
+
+def _wait_for_feed_growth(page, known_markers, sleep, window):
+    """Wait up to ``window`` s for the feed to add cards; extends while a loading spinner shows."""
+    waited, extensions = 0.0, 0
+    while waited < window:
+        sleep(0.5)
+        waited += 0.5
+        try:
+            if page.evaluate(_OLD_MARKER_COUNT_JS) > known_markers:
+                return True
+            if waited >= window and extensions < 3 and page.evaluate(_FEED_SPINNER_JS):
+                extensions += 1
+                waited = 0.0
+        except Exception:
+            return False
+    return False
+
+
 def read_old_section(page, section_name, sleep, collect_all=False, deadline=None):
     """Cards of one section ("Needs attention" / "All listings"), newest first."""
     try:
@@ -819,8 +868,18 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
             sleep(0.8)
     except Exception:
         pass
-    collected, stable = {}, 0
-    for _ in range(120 if collect_all else 1):
+    try:
+        # Cards can render a few seconds after their heading; an empty section just times out here.
+        page.wait_for_selector(_OLD_CARD_SELECTOR, state="attached",
+                               timeout=FEED_FIRST_CARD_WAIT_MS if collect_all else 3000)
+    except Exception:
+        pass
+    # Only the last section is an open-ended feed that keeps loading as you scroll.
+    patient = collect_all and section_name == SECTION_ALL_LISTINGS
+    window = FEED_GROWTH_WINDOW if patient else 1.5
+    need_idle = 2 if patient else 1
+    collected, idle, bottom_checked = {}, 0, not patient
+    for _ in range(300 if collect_all else 1):
         if deadline is not None and time.monotonic() >= deadline:
             break
         try:
@@ -831,22 +890,30 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
             break
         if not collect_all:
             return cards
-        before = len(collected)
+        grew = False
         for card in cards:
             key = card.get("listingId") or card.get("cardId") or card.get("key")
+            if key not in collected:
+                grew = True
             collected[key] = card
-        stable = stable + 1 if len(collected) == before else 0
-        if not cards or stable >= 3 or len(collected) >= MAX_SCAN_ROWS:
+        if len(collected) >= MAX_SCAN_ROWS:
             break
-        page.evaluate(r"""(section) => {
-            const cards = Array.from(document.querySelectorAll('[data-lp-card]'))
-                .filter(n => (n.getAttribute('data-lp-card') || '').startsWith(section + '-'));
-            const last = cards[cards.length - 1];
-            const before = window.scrollY;
-            if (last) last.scrollIntoView({block: 'end'});
-            if (window.scrollY === before) window.scrollBy(0, Math.max(200, innerHeight * 0.8));
-        }""", section_name)
-        sleep(random.uniform(0.6, 1.1))
+        if grew:
+            idle, bottom_checked = 0, not patient
+        else:
+            idle += 1
+        to_bottom = False
+        if idle >= need_idle:
+            if bottom_checked:
+                break
+            # Last chance: jump to the very bottom, where a "load more" area may be waiting.
+            bottom_checked, to_bottom = True, True
+        try:
+            known = page.evaluate(_OLD_MARKER_COUNT_JS)
+            page.evaluate(_SCROLL_OLD_FEED_JS, [section_name, to_bottom])
+        except Exception:
+            break
+        _wait_for_feed_growth(page, known, sleep, window)
     return list(collected.values())
 
 

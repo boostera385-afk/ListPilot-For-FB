@@ -211,8 +211,13 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                         if not listing_id:
                             need = no_id_seen[cache_key] = no_id_seen.get(cache_key, 0) + 1
                         # Search is the verdict: a listing counts as visible only if it shows in results.
-                        kind = _search(page, target, sleep, search_cache, need=need,
-                                       exhaustive=not listing_id and repeats.get(cache_key, 0) > 1)
+                        exhaustive = not listing_id and repeats.get(cache_key, 0) > 1
+                        kind = _search(page, target, sleep, search_cache, need=need, exhaustive=exhaustive)
+                        if kind is None:
+                            # A slow results page is not a miss: give it one more try before calling it unverified.
+                            log(f"[{label} checker] Search page was slow for '{target['title']}'; trying once more...")
+                            sleep(1.0)
+                            kind = _search(page, target, sleep, search_cache, need=need, exhaustive=exhaustive)
                         if kind == "ID":
                             state = lv.SEARCH
                         elif kind == "TEXT":

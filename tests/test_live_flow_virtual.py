@@ -156,6 +156,50 @@ BUYER_SEARCH = {  # query -> [(listing id, price, title)] shown to the buyer
 BUYER_ITEMS = {"222": "Deck stain - $40", "333": "This listing isn't available"}
 
 
+# --- Fake older "Your listings" page: cards load in slow batches as you scroll (infinite feed) ---
+OLD_LAZY_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>old selling page</title>
+<style>body{margin:0;font:14px sans-serif} .card{height:110px;border-bottom:1px solid #ccc;padding:8px}</style></head><body>
+<h2>Needs attention</h2>
+%(needs)s
+<h2>All listings</h2>
+<div id="feed"></div>
+<div id="sentinel" style="height:60px">Loading more...</div>
+<script>
+const TOTAL = %(total)d, BATCH = 10, DELAY = %(delay)d;
+let loaded = 0, loading = false;
+function cardHtml(i, status) {
+  const title = 'Service ' + i;
+  return '<div class="card"><div role="button" aria-label="More options for ' + title + '">...</div>' +
+    '<div>' + title + '</div><div>$34</div><div>Active \u00b7 Listed on 11/' + (10 + (i %% 18)) + '</div>' +
+    '<div>Listed on Marketplace \u00b7 ' + (i %% 5) + ' clicks on listing</div></div>';
+}
+function loadMore() {
+  if (loading || loaded >= TOTAL) return;
+  loading = true;
+  setTimeout(() => {
+    let html = '';
+    for (let k = 0; k < BATCH && loaded < TOTAL; k++) { loaded++; html += cardHtml(loaded); }
+    document.getElementById('feed').insertAdjacentHTML('beforeend', html);
+    loading = false;
+    if (loaded >= TOTAL) document.getElementById('sentinel').remove();
+  }, DELAY);
+}
+new IntersectionObserver((entries) => { if (entries.some(e => e.isIntersecting)) loadMore(); },
+                         {rootMargin: '0px'}).observe(document.getElementById('sentinel'));
+loadMore();
+</script></body></html>
+"""
+
+
+def _old_lazy_page(total=28, delay_ms=4500):
+    card = lambda i: (
+        '<div class="card"><div role="button" aria-label="More options for Attention %d">...</div>'
+        '<div>Attention %d</div><div>$34</div><div>Active · Listed on 11/17</div>'
+        '<div>We rejected this listing for breaking our rules. Listed on Marketplace · 0 clicks on listing</div></div>' % (i, i))
+    needs = "".join(card(i) for i in range(1, 4))
+    return OLD_LAZY_PAGE % {"needs": needs, "total": total, "delay": delay_ms}
+
+
 SEARCH_HITS = []  # every search query the fake Marketplace served, to prove repeats reuse one page load
 
 
@@ -179,6 +223,14 @@ def _buyer_page(path_and_query):
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = self.path.split("?")[0].strip("/").split("/")
+        if parts and parts[0] == "oldlazy":
+            data = _old_lazy_page().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if parts and parts[0] == "buyer":
             data = _buyer_page(self.path).encode("utf-8")
             self.send_response(200)
@@ -364,6 +416,25 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         self.assertTrue(any("not in search (saw:" in line for line in logs))
         # Repeated listings share one page load per search: 5 targets, 2 distinct searches.
         self.assertEqual(sorted(SEARCH_HITS), ["Gutter clean", "Hedge trim"])
+
+    def test_older_layout_reads_every_card_of_a_slow_infinite_feed(self):
+        import time as _time
+        from core.automation import live_checker as lc
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(self.debug_url)
+            page = browser.contexts[0].new_page()
+            try:
+                page.goto(self.base + "/oldlazy/marketplace/you/selling", wait_until="domcontentloaded")
+                page.wait_for_selector('[aria-label^="More options for "]', timeout=10000)
+                listings, tab_counts, notes = lc.read_all_listings_old_ui(page, _time.sleep)
+            finally:
+                page.close()
+        titles = {item["title"] for item in listings}
+        self.assertEqual(tab_counts.get("All listings"), 28, tab_counts)
+        self.assertEqual(tab_counts.get("Needs attention"), 3, tab_counts)
+        self.assertEqual(len(titles), 31, "every card of the slow feed must be read once")
+        self.assertEqual(notes, [])
 
     def test_logged_out_is_permanent_and_recorded(self):
         outcome, error, sheet, history, logs, post = self.run_flow("logged_out")

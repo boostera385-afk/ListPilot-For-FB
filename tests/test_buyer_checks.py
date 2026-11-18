@@ -148,3 +148,24 @@ class ParallelBuyerTests(unittest.TestCase):
                                      options=lv.BuyerOptions(pk_profile="pk", us_profile="us"))
         self.assertEqual(saved[0]["US Check"], "1/1 in search")
         self.assertIn("error", saved[0]["PK Check"])
+
+
+class SlowSearchRetryTests(unittest.TestCase):
+    def run_check(self, search_results):
+        with mock.patch.object(vc, "sync_playwright", return_value=BuyerRuntimeTests.fake_browser(None)), \
+             mock.patch.object(vc, "_goto", return_value=True), \
+             mock.patch.object(vc, "_blocked_reason", return_value=""), \
+             mock.patch.object(vc, "_search", side_effect=search_results) as search:
+            results = vc.check_listings("debug", "US", [{"title": "A", "listingId": "123", "price": "$5"}],
+                                        lambda _: None, lambda _: None)
+        return results, search
+
+    def test_a_slow_search_page_is_retried_once(self):
+        results, search = self.run_check([None, "ID"])
+        self.assertEqual(results, [lv.SEARCH])
+        self.assertEqual(search.call_count, 2)
+
+    def test_a_search_page_that_never_loads_stays_unverified(self):
+        results, search = self.run_check([None, None])
+        self.assertEqual(results, [lv.UNCLEAR])
+        self.assertEqual(search.call_count, 2)
