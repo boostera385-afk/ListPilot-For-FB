@@ -96,8 +96,15 @@ def visibility_targets(listings, limit=MAX_TARGETS_PER_PROFILE):
         for item in listings or []
         if (item or {}).get("state") == ls.LIVE and _clean(item.get("title"))
     ]
-    # Prefer exact listing IDs. A shared service title cannot identify its owner.
-    live.sort(key=lambda item: not bool(item["listingId"]))
+    # Prefer exact listing IDs (a shared service title cannot identify its owner), then
+    # different services before repeats of one, so a small sample covers more than one title.
+    seen, repeat = set(), {}
+    for index, item in enumerate(live):
+        key = (loose_key(item["title"]), item["price"].lower())
+        repeat[index] = key in seen
+        seen.add(key)
+    order = sorted(range(len(live)), key=lambda index: (not live[index]["listingId"], repeat[index]))
+    live = [live[index] for index in order]
     return live[:limit], max(0, len(live) - limit)
 
 

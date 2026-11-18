@@ -156,12 +156,16 @@ BUYER_SEARCH = {  # query -> [(listing id, price, title)] shown to the buyer
 BUYER_ITEMS = {"222": "Deck stain - $40", "333": "This listing isn't available"}
 
 
+SEARCH_HITS = []  # every search query the fake Marketplace served, to prove repeats reuse one page load
+
+
 def _buyer_page(path_and_query):
     from urllib.parse import urlparse, parse_qs
     url = urlparse(path_and_query)
     segments = url.path.strip("/").split("/")  # buyer / marketplace / search | item / <id>
     if "search" in segments:
         query = parse_qs(url.query).get("query", [""])[0]
+        SEARCH_HITS.append(query)
         cards = "".join(
             f'<a href="/marketplace/item/{i}/"><div>{price}</div><div>{title}</div><div>Houston, TX</div></a>'
             for i, price, title in BUYER_SEARCH.get(query, []))
@@ -351,12 +355,15 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         one_card = {"title": "Gutter clean", "listingId": "", "price": "$30"}   # search shows ONE such card
         two_cards = {"title": "Hedge trim", "listingId": "", "price": "$50"}    # search shows TWO such cards
         logs = []
+        del SEARCH_HITS[:]
         with mock.patch.object(lv, "FB_SEARCH", self.base + "/buyer/marketplace/search/?query={query}&exact=false"),                 mock.patch.object(lv, "FB_ITEM", self.base + "/buyer/marketplace/item/{id}/"),                 mock.patch.object(vc, "MARKETPLACE_HOME", self.base + "/buyer/marketplace/"):
             results = vc.check_listings(self.debug_url, "PK", [one_card, one_card, two_cards, two_cards, two_cards],
                                         logs.append, lambda seconds: None)
         # One card cannot prove two identical listings; two cards prove two, not three.
         self.assertEqual(results, [lv.TEXT_MATCH, lv.NOT_FOUND, lv.TEXT_MATCH, lv.TEXT_MATCH, lv.NOT_FOUND], logs[-6:])
         self.assertTrue(any("not in search (saw:" in line for line in logs))
+        # Repeated listings share one page load per search: 5 targets, 2 distinct searches.
+        self.assertEqual(sorted(SEARCH_HITS), ["Gutter clean", "Hedge trim"])
 
     def test_logged_out_is_permanent_and_recorded(self):
         outcome, error, sheet, history, logs, post = self.run_flow("logged_out")

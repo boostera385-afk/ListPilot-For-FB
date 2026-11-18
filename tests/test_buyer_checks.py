@@ -116,3 +116,35 @@ class BuyerRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParallelBuyerTests(unittest.TestCase):
+    def test_pk_and_us_run_side_by_side(self):
+        barrier = threading.Barrier(2, timeout=5)  # both must be inside a check at the same time
+
+        def fake_check(url, label, targets, log, sleep, on_result=None, on_detail=None):
+            barrier.wait()
+            for _ in targets:
+                on_result()
+            return [lv.SEARCH] * len(targets)
+
+        posts = [{"rowNumber": 4, "_live_listings": [{"state": "LIVE", "title": "A", "listingId": "123", "price": "$5"}]}]
+        options = lv.BuyerOptions(pk_profile="pk", us_profile="us")
+        saved = []
+        with mock.patch.object(vc, "start_profile", return_value=(True, {"url": "http://127.0.0.1:1"})),              mock.patch.object(vc, "stop_profile", return_value=True),              mock.patch.object(vc, "check_listings", side_effect=fake_check),              mock.patch.object(vc, "update_column_values", side_effect=lambda sheet, row, values: saved.append(values) or (True, "ok")):
+            summary = vc.run_visibility_checks(posts, lambda _: None, threading.Event(), options=options)
+        self.assertEqual(summary, {"OK": 1}, "a sequential run would time out on the barrier and report ERROR")
+        self.assertEqual(saved[0]["PK Check"], "1/1 in search")
+        self.assertEqual(saved[0]["US Check"], "1/1 in search")
+
+    def test_one_buyer_failing_to_start_keeps_the_other_buyers_results(self):
+        def fake_start(profile, **kwargs):
+            return (True, {"url": "http://127.0.0.1:1"}) if profile == "us" else (False, "profile missing")
+
+        posts = [{"rowNumber": 4, "_live_listings": [{"state": "LIVE", "title": "A", "listingId": "123", "price": "$5"}]}]
+        saved = []
+        with mock.patch.object(vc, "start_profile", side_effect=fake_start),              mock.patch.object(vc, "stop_profile", return_value=True),              mock.patch.object(vc, "check_listings", side_effect=lambda *a, on_result=None, **k: (on_result(), [lv.SEARCH])[1]),              mock.patch.object(vc, "update_column_values", side_effect=lambda sheet, row, values: saved.append(values) or (True, "ok")):
+            vc.run_visibility_checks(posts, lambda _: None, threading.Event(),
+                                     options=lv.BuyerOptions(pk_profile="pk", us_profile="us"))
+        self.assertEqual(saved[0]["US Check"], "1/1 in search")
+        self.assertIn("error", saved[0]["PK Check"])

@@ -6,7 +6,9 @@ listing is not in the results it opens the listing link. Results are written
 per owner row. The owner profile is never used to judge visibility.
 """
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from playwright.sync_api import sync_playwright
 
@@ -105,7 +107,7 @@ def _goto(page, url, sleep):
     return True
 
 
-def _search(page, target, sleep, cache=None, need=1):
+def _search(page, target, sleep, cache=None, need=1, exhaustive=False):
     """``"ID"`` / ``"TEXT"`` when the listing shows in search, ``""`` when it does not,
     ``None`` when the results page never loaded (never a confident miss)."""
     key = lv.search_url(target["title"])
@@ -133,7 +135,7 @@ def _search(page, target, sleep, cache=None, need=1):
             return None
         collected.extend(results)
         kind = lv.match_in_search(collected, target, need)
-        if kind:
+        if kind and not exhaustive:
             if cache is not None:
                 cache[key] = (collected, False)
             return kind
@@ -143,9 +145,11 @@ def _search(page, target, sleep, cache=None, need=1):
             except Exception:
                 break
             sleep(random.uniform(0.6, 1.0))
+    # Scrolled to the end (always, when several identical listings share this search):
+    # the stored results are complete, so repeats are answered without another page load.
     if cache is not None:
         cache[key] = (collected, True)
-    return ""
+    return lv.match_in_search(collected, target, need) or ""
 
 
 def _open_link(page, target, sleep):
@@ -167,6 +171,11 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
     """One result per target, in order, from one checker browser."""
     results = []
     search_cache, result_cache, no_id_seen = {}, {}, {}
+    repeats = {}
+    for target in targets:
+        if not target.get("listingId"):
+            key = f"{target['title']}|{target.get('price', '')}"
+            repeats[key] = repeats.get(key, 0) + 1
     if not any(target.get("listingId") or target.get("price") for target in targets):
         for _ in targets:
             if on_result:
@@ -202,7 +211,8 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                         if not listing_id:
                             need = no_id_seen[cache_key] = no_id_seen.get(cache_key, 0) + 1
                         # Search is the verdict: a listing counts as visible only if it shows in results.
-                        kind = _search(page, target, sleep, search_cache, need=need)
+                        kind = _search(page, target, sleep, search_cache, need=need,
+                                       exhaustive=not listing_id and repeats.get(cache_key, 0) > 1)
                         if kind == "ID":
                             state = lv.SEARCH
                         elif kind == "TEXT":
@@ -272,23 +282,40 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
 
     total_checks = len(flat) * len(checkers)
     done = [0]
+    lock = threading.Lock()
 
     def advance(count=1):
-        done[0] += count
+        with lock:
+            done[0] += count
+            current = min(done[0], total_checks)
         if progress:
-            progress(min(done[0], total_checks), total_checks)
+            progress(current, total_checks)
 
     advance(0)
     per_label = {}
-    for label, profile in checkers:
-        label_start = done[0]
+    counted = {}
+
+    def run_one(label, profile):
+        """One buyer account's pass. PK and US are different browsers, so they run side by side."""
+        counted[label] = 0
+
+        def on_result():
+            counted[label] += 1
+            advance()
+
+        def count_remaining():
+            remaining = len(flat) - counted[label]
+            if remaining > 0:  # listings skipped by an early stop or failure
+                counted[label] += remaining
+                advance(remaining)
+
         if stop_event.is_set():
-            break
+            return
         if not any(target.get("listingId") or target.get("price") for target in flat):
             log(f"[{label} checker] No listing IDs or prices in the sample; skipped browser launch.")
             per_label[label] = [lv.UNCLEAR] * len(flat)
-            advance(len(flat))
-            continue
+            count_remaining()
+            return
         log(f"[{label} checker] Starting profile '{profile}'...")
         from gui.ui_helpers import resolve_duplicates_ui
         started, data = start_profile(profile, duplicate_resolver=resolve_duplicates_ui, master=master, logger_callback=log)
@@ -296,23 +323,33 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
         if not url:
             log(f"[{label} checker] could not start: {data if not started else 'no CDP endpoint'}")
             per_label[label] = [lv.ERROR] * len(flat)
-            advance(len(flat))
+            count_remaining()
             if started:
                 stop_profile(profile)
-            continue
+            return
         try:
-            per_label[label] = check_listings(url, label, flat, log, sleep, on_result=advance, on_detail=detail)
+            per_label[label] = check_listings(url, label, flat, log, sleep, on_result=on_result, on_detail=detail)
         except AutomationStopped:
             per_label[label] = [lv.UNCLEAR] * len(flat)
-            break
         except Exception as exc:
             log(f"[{label} checker] failed: {exc}")
             per_label[label] = [lv.ERROR] * len(flat)
         finally:
-            advance(label_start + len(flat) - done[0])  # count listings skipped by an early stop
+            count_remaining()
             if not stop_profile(profile):
                 log(f"[{label} checker] Warning: the browser provider did not confirm the profile stopped.")
             stop_event.wait(0.2)
+
+    def guarded(label, profile):
+        try:
+            run_one(label, profile)
+        except Exception as exc:  # a launch failure on one buyer must not lose the other's results
+            log(f"[{label} checker] failed: {exc}")
+            per_label[label] = [lv.ERROR] * len(flat)
+
+    with ThreadPoolExecutor(max_workers=max(1, len(checkers))) as pool:
+        for future in [pool.submit(guarded, label, profile) for label, profile in checkers]:
+            future.result()
 
     summary = {}
     offset = 0

@@ -69,3 +69,15 @@ Measured: owner scan 1m 45s, buyer sample 1m 32s (6 checks per buyer), total run
 | 4 | The results table showed only about one row on a normal 1080p screen. | Stat cards are one line, the explanatory lines hide on a short window, and the table height follows the window. The results area grew by about 24 percent on the test window. |
 
 Still true after this run: a listing in a city far from the buyer's saved Marketplace location can show "Not in search" while being live. Set the buyer's Marketplace location near the listing to test search properly.
+
+## 7. Third real run (3 profiles at once, buyers on, Quick sample)
+
+Measured: 3 profiles read in 2m 32s (about 1 min each, in parallel), buyer pass 3m 02s for 9 listings x 2 buyers, total 5m 33s. No `Skipped` rows and no doubled totals, so the duplicate-row fix held. The `not in search (saw: ...)` lines worked: they showed the PK buyer was looking at Houston listings and the US buyer at San Diego, El Cajon and La Mesa listings, with other sellers' prices.
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | The Quick sample was the first three live listings in tab order, so it was mostly the same service (for example Furniture, Furniture, Carpet). | The sample now takes listing IDs first, then different title + price combinations before any repeat, so three listings cover three services where the account has them. |
+| 2 | PK and US ran one after the other (about 3 min). They are different browsers. | They now run side by side, so the buyer pass is about half as long. One buyer failing to start keeps the other's results. |
+| 3 | A repeated no-ID listing could trigger a second search page load. | When several listings share a search, it is scrolled once to the end and every repeat is answered from it. |
+
+Reading the numbers: because the three `1 Oct` accounts list almost every service at the same price ($34), a title + price match only says that *a* listing with that title and price shows in the buyer's search. It does not prove it is this seller's. That is why those rows stay `PARTIAL` or `NOT_IN_SEARCH` until an ID confirms them.

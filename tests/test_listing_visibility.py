@@ -145,3 +145,26 @@ class IdenticalListingTests(unittest.TestCase):
         results = [{"text": "$30\nA\nHouston"}, {"text": "$30\nA\nHouston"}, {"text": "$9\nB"}]
         self.assertEqual(lv.describe_results(results), "$30 A Houston | $9 B")
         self.assertEqual(lv.describe_results([]), "no result cards")
+
+
+class SampleDiversityTests(unittest.TestCase):
+    def live(self, title, price="$34", listing_id=""):
+        return {"state": "LIVE", "title": title, "price": price, "listingId": listing_id}
+
+    def test_a_small_sample_covers_different_services_before_repeats(self):
+        listings = [self.live("Furniture"), self.live("Furniture"), self.live("Furniture"),
+                    self.live("Carpet"), self.live("Lights")]
+        targets, skipped = lv.visibility_targets(listings, limit=3)
+        self.assertEqual([t["title"] for t in targets], ["Furniture", "Carpet", "Lights"])
+        self.assertEqual(skipped, 2)
+
+    def test_same_title_with_a_different_price_counts_as_different(self):
+        listings = [self.live("Furniture", "$34"), self.live("Furniture", "$34"), self.live("Furniture", "$40")]
+        targets, _ = lv.visibility_targets(listings, limit=2)
+        self.assertEqual([t["price"] for t in targets], ["$34", "$40"])
+
+    def test_ids_still_come_first(self):
+        listings = [self.live("A"), self.live("B"), self.live("A", listing_id="9")]
+        targets, _ = lv.visibility_targets(listings, limit=2)
+        self.assertEqual(targets[0]["listingId"], "9")
+        self.assertEqual(targets[1]["title"], "A")
