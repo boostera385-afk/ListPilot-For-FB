@@ -2,8 +2,11 @@ import customtkinter as ctk
 import threading
 import time
 from core.engine.grouped_automation_engine import GroupedAutomationEngine
-from core.services.sheets_service import fetch_pending_rows, reset_rows_for_recheck
-from core.automation.browser_manager import is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label
+from core.services.sheets_service import fetch_pending_rows, reset_rows_for_recheck, update_row_status
+from core.utils.queue_rows import split_duplicate_rows
+from core.automation.browser_manager import (
+    is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label, resolve_profile_id,
+)
 from core.automation.live_checker import run_live_checker_flow, LIVE_CHECKER_SHEET
 from core.automation.listing_status import format_counts, format_duration, other_count
 from core.automation.visibility_checker import configured_checkers, run_visibility_checks, buyer_options, validate_checker_roles
@@ -85,6 +88,8 @@ class LiveCheckerView(ctk.CTkFrame):
         self._build_progress()
         self._build_tabs()
         self._set_steps_visible(False)
+        self._dense = None
+        self.bind("<Configure>", self._apply_density)
 
         self.status_pulse = anim.Pulse(self.status_chip, "text_color", theme.ACCENT_SOFT, theme.GREEN)
         self._refresh_checkers()
@@ -125,7 +130,7 @@ class LiveCheckerView(ctk.CTkFrame):
                                        width=170, height=40, corner_radius=theme.RADIUS_SM,
                                        fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                                        font=theme.font(14, "bold"))
-        self.start_btn.grid(row=0, column=0, rowspan=2, padx=(16, 8), pady=16)
+        self.start_btn.grid(row=0, column=0, rowspan=2, padx=(16, 8), pady=10)
 
         self.stop_btn = ctk.CTkButton(card, text="Pause", command=self.stop_automation, width=86, height=40,
                                       corner_radius=theme.RADIUS_SM, fg_color=theme.DANGER,
@@ -288,6 +293,15 @@ class LiveCheckerView(ctk.CTkFrame):
         self.step1.reset()
         self.step2.reset("Waiting" if self.run_options.checkers else "Off")
         self._set_steps_visible(self._reverse_widget_scaling(self.winfo_height()) >= 650)
+
+    def _apply_density(self, event=None):
+        """On a short window, drop the two explanatory lines so the results table gets the room."""
+        dense = self._reverse_widget_scaling(self.winfo_height()) < 800
+        if dense == self._dense:
+            return
+        self._dense = dense
+        for widget in (self.header_desc, self.mode_help):
+            widget.grid_remove() if dense else widget.grid()
 
     def _tick_elapsed(self):
         elapsed = max(0, int(time.monotonic() - self._started_at)) if self._started_at else 0
@@ -503,6 +517,20 @@ class LiveCheckerView(ctk.CTkFrame):
             return
 
         posts = list(result or [])
+        # The same profile twice would be scanned twice at once and double every total.
+        try:
+            posts, duplicates = split_duplicate_rows(posts, resolve=resolve_profile_id)
+        except Exception:
+            duplicates = []
+        for duplicate, first_row in duplicates:
+            row = duplicate.get("rowNumber")
+            logger_proxy(f"Row {row} skipped: it is the same profile as row {first_row}. "
+                         "Each profile is checked once per run.")
+            if row:
+                try:
+                    update_row_status(LIVE_CHECKER_SHEET, row, f"Skipped: same profile as row {first_row}")
+                except Exception:
+                    pass
         if not posts:
             logger_proxy("No pending tasks found.")
             toast("Nothing to check – no pending rows.", theme.AMBER)

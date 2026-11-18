@@ -105,13 +105,13 @@ def _goto(page, url, sleep):
     return True
 
 
-def _search(page, target, sleep, cache=None):
+def _search(page, target, sleep, cache=None, need=1):
     """``"ID"`` / ``"TEXT"`` when the listing shows in search, ``""`` when it does not,
     ``None`` when the results page never loaded (never a confident miss)."""
     key = lv.search_url(target["title"])
     if cache is not None and key in cache:
         cached, complete = cache[key]
-        kind = lv.match_in_search(cached, target)
+        kind = lv.match_in_search(cached, target, need)
         if kind:
             return kind
         if complete:
@@ -132,7 +132,7 @@ def _search(page, target, sleep, cache=None):
         except Exception:
             return None
         collected.extend(results)
-        kind = lv.match_in_search(collected, target)
+        kind = lv.match_in_search(collected, target, need)
         if kind:
             if cache is not None:
                 cache[key] = (collected, False)
@@ -166,7 +166,7 @@ def _open_link(page, target, sleep):
 def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_detail=None):
     """One result per target, in order, from one checker browser."""
     results = []
-    search_cache, result_cache = {}, {}
+    search_cache, result_cache, no_id_seen = {}, {}, {}
     if not any(target.get("listingId") or target.get("price") for target in targets):
         for _ in targets:
             if on_result:
@@ -194,11 +194,15 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                     if not listing_id and not target.get("price"):
                         state = lv.UNCLEAR
                         log(f"[{label} checker] No listing ID or price for '{target['title']}'; title-only matches are not verified.")
-                    elif cache_key in result_cache:
-                        state = result_cache[cache_key]
+                    elif listing_id and listing_id in result_cache:
+                        state = result_cache[listing_id]
                     else:
+                        # Identical no-ID listings (same title and price) each need their own result card.
+                        need = 1
+                        if not listing_id:
+                            need = no_id_seen[cache_key] = no_id_seen.get(cache_key, 0) + 1
                         # Search is the verdict: a listing counts as visible only if it shows in results.
-                        kind = _search(page, target, sleep, search_cache)
+                        kind = _search(page, target, sleep, search_cache, need=need)
                         if kind == "ID":
                             state = lv.SEARCH
                         elif kind == "TEXT":
@@ -210,8 +214,11 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                             state = _open_link(page, target, sleep)  # opens by link but not in search = LINK_ONLY
                         else:
                             state = lv.NOT_FOUND  # no ID, so there is no link to try
-                    if state not in (lv.ERROR, lv.UNCLEAR):
-                        result_cache[cache_key] = state
+                            cards = search_cache.get(lv.search_url(target["title"]), ([], True))[0]
+                            log(f"[{label} checker] '{target['title']}' {target.get('price', '')} not in search "
+                                f"(saw: {lv.describe_results(cards)})")
+                    if listing_id and state not in (lv.ERROR, lv.UNCLEAR):
+                        result_cache[listing_id] = state
                     if _blocked_reason(page):
                         log(f"[{label} checker] account blocked mid-run; stopping this checker.")
                         results.extend([lv.ERROR] * (len(targets) - len(results)))

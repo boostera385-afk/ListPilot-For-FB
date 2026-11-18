@@ -151,6 +151,7 @@ BUYER_SEARCH = {  # query -> [(listing id, price, title)] shown to the buyer
     "Window wash": [("556", "$25", "Window wash")],
     "Deck stain": [("900", "$10", "Deck stain cover")],
     "Fence paint": [("901", "$9", "Fence paint kit")],
+    "Hedge trim": [("700", "$50", "Hedge trim"), ("701", "$50", "Hedge trim")],
 }
 BUYER_ITEMS = {"222": "Deck stain - $40", "333": "This listing isn't available"}
 
@@ -342,6 +343,20 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         self.assertEqual(lv.summarize_checker(results),
                          "2/5 in search, 1 by title+price, 1 link only, 1 not found, 1 unavailable")
         self.assertTrue(lv.overall_visibility({"PK": results}).startswith("HIDDEN"))
+
+    def test_identical_listings_without_ids_need_one_result_card_each(self):
+        from core.automation import listing_visibility as lv
+        from core.automation import visibility_checker as vc
+
+        one_card = {"title": "Gutter clean", "listingId": "", "price": "$30"}   # search shows ONE such card
+        two_cards = {"title": "Hedge trim", "listingId": "", "price": "$50"}    # search shows TWO such cards
+        logs = []
+        with mock.patch.object(lv, "FB_SEARCH", self.base + "/buyer/marketplace/search/?query={query}&exact=false"),                 mock.patch.object(lv, "FB_ITEM", self.base + "/buyer/marketplace/item/{id}/"),                 mock.patch.object(vc, "MARKETPLACE_HOME", self.base + "/buyer/marketplace/"):
+            results = vc.check_listings(self.debug_url, "PK", [one_card, one_card, two_cards, two_cards, two_cards],
+                                        logs.append, lambda seconds: None)
+        # One card cannot prove two identical listings; two cards prove two, not three.
+        self.assertEqual(results, [lv.TEXT_MATCH, lv.NOT_FOUND, lv.TEXT_MATCH, lv.TEXT_MATCH, lv.NOT_FOUND], logs[-6:])
+        self.assertTrue(any("not in search (saw:" in line for line in logs))
 
     def test_logged_out_is_permanent_and_recorded(self):
         outcome, error, sheet, history, logs, post = self.run_flow("logged_out")

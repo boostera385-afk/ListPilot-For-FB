@@ -133,8 +133,12 @@ def found_in_search(results, target):
     return False
 
 
-def match_in_search(results, target):
+def match_in_search(results, target, need=1):
     """How a target shows in search results: ``"ID"``, ``"TEXT"`` or ``""`` (not found).
+
+    ``need`` is how many identical listings (same title and price, no ID) the seller has
+    in the sample so far: a text match then needs that many distinct result cards, so two
+    identical listings are not both "found" by a single card.
 
     ``"ID"`` is an exact Facebook listing-ID hit. ``"TEXT"`` is used only for a
     listing that has no ID (older seller pages): a result card whose lines hold
@@ -149,11 +153,25 @@ def match_in_search(results, target):
     price = _clean(target.get("price")).lower()
     if not title or not price:
         return ""
+    cards = set()
     for result in results or []:
         lines = [_clean(line).lower() for line in str(result.get("text") or "").splitlines() if _clean(line)]
         if price in lines and any(loose_key(line) == title for line in lines):
-            return "TEXT"
-    return ""
+            cards.add(item_id_from_href(result.get("href")) or _clean(result.get("href")) or " ".join(lines))
+    return "TEXT" if len(cards) >= max(1, int(need or 1)) else ""
+
+
+def describe_results(results, limit=3):
+    """A short 'price Title place | ...' sample of what a search returned, for the log."""
+    seen, parts = set(), []
+    for result in results or []:
+        text = " ".join(str(result.get("text") or "").split())[:70]
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+        if len(parts) >= limit:
+            break
+    return " | ".join(parts) if parts else "no result cards"
 
 
 def state_label(state):

@@ -72,10 +72,14 @@ class StatCard(Card):
             row=0, column=0, rowspan=2, sticky="ns", padx=(12, 10), pady=14
         )
         self.value = ctk.CTkLabel(self, text="0", font=theme.font(22 if compact else 26, "bold"), text_color=theme.TEXT, anchor="w")
-        self.value.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(8 if compact else 12, 0))
-        ctk.CTkLabel(self, text=title, font=theme.font(11 if compact else 12), text_color=theme.TEXT_MUTED, anchor="w").grid(
-            row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 8 if compact else 12)
-        )
+        title_label = ctk.CTkLabel(self, text=title, font=theme.font(11 if compact else 12), text_color=theme.TEXT_MUTED, anchor="w")
+        if compact:
+            # One line (number, then its name) so the results table below gets the saved height.
+            self.value.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=8)
+            title_label.grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
+        else:
+            self.value.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(12, 0))
+            title_label.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 12))
 
     def set(self, value):
         anim.count_up(self.value, value)
@@ -267,10 +271,14 @@ class ResultsTable(ctk.CTkFrame):
             table_host = ctk.CTkFrame(self.horizontal, width=min_width, height=120, fg_color="transparent")
             table_host.grid(row=0, column=0, sticky="nsew")
             table_host.grid_propagate(False)
+            self.table_host = table_host
             table_host.grid_columnconfigure(0, weight=1)
             table_host.grid_rowconfigure(1, weight=1)
+            # Width follows the window; height follows it too, so a taller window shows more rows
+            # (it used to stay at 120, which left room for about one row).
             self.bind("<Configure>", lambda event: table_host.configure(
-                width=max(min_width, self._reverse_widget_scaling(event.width) - 16)))
+                width=max(min_width, self._reverse_widget_scaling(event.width) - 16),
+                height=max(120, self._reverse_widget_scaling(event.height) - 66)))
             header_row, body_row = 0, 1
         header = ctk.CTkFrame(table_host, fg_color=theme.SURFACE_ALT, corner_radius=theme.RADIUS_SM)
         header.grid(row=header_row, column=0, sticky="ew", padx=(0, 14) if min_width else 0)

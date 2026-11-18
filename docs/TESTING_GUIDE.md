@@ -61,6 +61,7 @@ Fill rows 2 and 3 only, columns A-D:
 - **Row 2 (Row A)** - a profile you know is logged in and has listings.
 - **Row 3 (Row B)** - the profile that previously showed nothing.
 - **ID** can be left empty if `Profile Name` matches exactly.
+- List each profile **once**. A profile named twice is checked once and the later row is marked `Skipped`.
 - **Proxy**: leave empty. A filled Proxy overwrites the profile's own proxy before launch.
 - **Status**: leave empty; empty means "to do".
 - Nothing else is needed. The other columns are filled in by the app.

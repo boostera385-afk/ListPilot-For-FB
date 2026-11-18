@@ -56,3 +56,16 @@ Run `formatListPilotSheets` once (or use the **ListPilot** menu in the sheet). I
 4. **The ten planned department rows are not ten verified published listings.** Buyer checks need real listing IDs from the owner scan.
 5. **Buyer timing** after the speed-up is not measured live yet (section 1).
 6. Row `testing` is an old failed seller row and is now the PK buyer. Do not use "Re-check every profile" on it.
+
+## 6. Second real run (profiles `1 Oct Id 1 ali` and `1 Oct Id 2 ali`, buyers on, Quick sample)
+
+Measured: owner scan 1m 45s, buyer sample 1m 32s (6 checks per buyer), total run 3m 18s. The buyer pass went from about 9 min (30 checks) to 1m 32s.
+
+| # | Problem found | Fix |
+|---|---|---|
+| 1 | **The same profile was queued twice** (rows 7 and 8 were both named `1 Oct Id 1 ali`). It was scanned twice at the same time, so totals doubled (42 LIVE = 21 x 2) and two tabs worked on one Facebook account together. | Rows naming the same profile (same ID, same name ignoring case and spaces, or the same resolved profile) are now checked once. The later row is marked `Skipped: same profile as row N` and the log says so. |
+| 2 | Two identical listings (same title and price, no ID) were both reported "in search" although one search card was seen. | Identical no-ID listings now each need their own result card: one card proves one listing, not two. |
+| 3 | `NOT_FOUND` gave no clue why. | The log now shows what the search returned (`not in search (saw: $34 Furniture ... | ...)`), so a title or price mismatch is visible at once. |
+| 4 | The results table showed only about one row on a normal 1080p screen. | Stat cards are one line, the explanatory lines hide on a short window, and the table height follows the window. The results area grew by about 24 percent on the test window. |
+
+Still true after this run: a listing in a city far from the buyer's saved Marketplace location can show "Not in search" while being live. Set the buyer's Marketplace location near the listing to test search properly.

@@ -125,3 +125,23 @@ class SearchFirstTests(unittest.TestCase):
         self.assertEqual(lv.listing_verdict([lv.UNCLEAR]), "Not verified")
         self.assertEqual(lv.listing_verdict([]), "Not checked")
         self.assertEqual(lv.state_label(lv.LINK_ONLY), "Link opens, not in search")
+
+
+class IdenticalListingTests(unittest.TestCase):
+    @staticmethod
+    def card(item_id):
+        return {"href": f"/marketplace/item/{item_id}/", "text": "\n".join(["$30", "Gutter clean", "Houston"])}
+
+    def test_need_counts_distinct_result_cards(self):
+        target = {"title": "Gutter clean", "listingId": "", "price": "$30"}
+        one = [self.card("1")]
+        self.assertEqual(lv.match_in_search(one, target, need=1), "TEXT")
+        self.assertEqual(lv.match_in_search(one, target, need=2), "")
+        # the same card seen again after scrolling is still one card
+        self.assertEqual(lv.match_in_search(one + [self.card("1")], target, need=2), "")
+        self.assertEqual(lv.match_in_search([self.card("1"), self.card("2")], target, need=2), "TEXT")
+
+    def test_describe_results_is_short_and_deduplicated(self):
+        results = [{"text": "$30\nA\nHouston"}, {"text": "$30\nA\nHouston"}, {"text": "$9\nB"}]
+        self.assertEqual(lv.describe_results(results), "$30 A Houston | $9 B")
+        self.assertEqual(lv.describe_results([]), "no result cards")
