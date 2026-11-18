@@ -91,6 +91,19 @@ At the end of a run the log shows total listings by status and profiles with pro
 
 ---
 
+## 6a. Visibility check (PK + US checker accounts)
+
+The owner profile only tells us what Facebook shows *the seller*. To confirm a buyer can see a listing, two **other** accounts check it after all owner scans finish:
+
+- Set them in **Settings -> Live Checker - Checker Profiles**: one Pakistani account, one USA account with a confirmed location. Empty = step skipped.
+- Each checker profile opens **once** per run (PK first, then US) and, for every `LIVE` listing (max 15 per owner row):
+  1. searches Marketplace by the title and looks for the listing ID in the results (title match when there is no ID; scrolls 3 times);
+  2. if not found, opens `marketplace/item/<ID>` directly.
+- Results per listing: `SEARCH` (found in search), `LINK_ONLY` (opens by link but not in search near that account), `HIDDEN` (link says not available), `UNCLEAR`, `ERROR` (checker logged out / checkpoint / failed).
+- Columns written: `PK Check`, `US Check` (e.g. `3/4 in search, 1 link only`), `Visibility` (`OK`, `HIDDEN: n`, `NOT_IN_SEARCH: n`, `PARTIAL: ...`), `Visibility Details` (one line per listing), `Visibility Checked`.
+- Note: search is location based, so a Pakistani account will usually not find US-city listings in search; for it, `LINK_ONLY` is the expected "visible" result and `HIDDEN` is the real warning.
+- Stop works during this step. Checker logged out / checkpoint saves a screenshot to `debug/`.
+
 ## 7. Apps Script
 
 File: `core/assets/apps_script.js`. **Redeploy after any change** (Extensions -> Apps Script -> paste -> run `setupSheets` once -> Deploy -> New version).

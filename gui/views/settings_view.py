@@ -134,12 +134,32 @@ class SettingsView(ctk.CTkFrame):
         if current_url:
             self.url_entry.insert(0, current_url)
 
+        # --- Live Checker visibility accounts ---
+        self.checker_label = ctk.CTkLabel(self.settings_frame, text="Live Checker - Checker Profiles:", font=ctk.CTkFont(weight="bold"))
+        self.checker_label.grid(row=18, column=0, sticky="w", pady=(20, 5))
+
+        self.checker_desc = ctk.CTkLabel(
+            self.settings_frame,
+            text="Profile name or ID of two other accounts that search for each LIVE listing as a buyer.\n"
+                 "Leave empty to skip the visibility check.",
+            text_color="gray", justify="left",
+        )
+        self.checker_desc.grid(row=19, column=0, sticky="w", pady=(0, 10))
+
+        self.pk_checker_entry = ctk.CTkEntry(self.settings_frame, placeholder_text="Pakistani account profile")
+        self.pk_checker_entry.grid(row=20, column=0, sticky="ew", pady=(0, 5))
+        self.pk_checker_entry.insert(0, get_setting("live_check_pk_profile", "") or "")
+
+        self.us_checker_entry = ctk.CTkEntry(self.settings_frame, placeholder_text="USA (confirmed location) account profile")
+        self.us_checker_entry.grid(row=21, column=0, sticky="ew")
+        self.us_checker_entry.insert(0, get_setting("live_check_us_profile", "") or "")
+
         # --- Save Button ---
         self.save_btn = ctk.CTkButton(self.settings_frame, text="Save All Settings", command=self.on_save)
-        self.save_btn.grid(row=18, column=0, sticky="w", pady=(20, 0))
+        self.save_btn.grid(row=22, column=0, sticky="w", pady=(20, 0))
 
         self.status_label = ctk.CTkLabel(self.settings_frame, text="", text_color="gray")
-        self.status_label.grid(row=19, column=0, sticky="w", pady=(5, 0))
+        self.status_label.grid(row=23, column=0, sticky="w", pady=(5, 0))
 
     def on_browse(self):
         file_path = filedialog.askopenfilename(
@@ -173,6 +193,8 @@ class SettingsView(ctk.CTkFrame):
         set_setting("adspower_api_key", new_ads_key)
         set_setting("adspower_os", os_key)
         set_setting("apps_script_url", new_url)
+        set_setting("live_check_pk_profile", self.pk_checker_entry.get().strip())
+        set_setting("live_check_us_profile", self.us_checker_entry.get().strip())
 
         self.status_label.configure(text="Settings saved successfully!", text_color="green")
         self.after(3000, lambda: self.status_label.configure(text=""))

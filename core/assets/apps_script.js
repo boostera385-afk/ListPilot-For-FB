@@ -42,7 +42,9 @@ function setCellSafely_(range, value) {
 const AUTO_COLUMNS = {};
 const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Listing Details", "Check Result", "Last Checked"];
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
-AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
+// Buyer-side check from the Pakistani and USA checker accounts.
+const VISIBILITY_COLUMNS = ["PK Check", "US Check", "Visibility", "Visibility Details", "Visibility Checked"];
+AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS);
 AUTO_COLUMNS[SHEET_RESPONSE_CHECKER] = ["Responses"];
 
 function jsonOut_(obj) {

@@ -9,11 +9,11 @@ class HomeView(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         
         # Title
-        self.title_label = ctk.CTkLabel(self, text="KitKat", font=ctk.CTkFont(size=24, weight="bold"))
+        self.title_label = ctk.CTkLabel(self, text="ListPilot", font=ctk.CTkFont(size=24, weight="bold"))
         self.title_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="nw")
         
         # Description
-        self.desc_label = ctk.CTkLabel(self, text="Select a process from the sidebar.", text_color="gray")
+        self.desc_label = ctk.CTkLabel(self, text="Post, track and verify every Marketplace listing. Pick a tool from the sidebar.", text_color="gray")
         self.desc_label.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nw")
         
         # Welcome Panel

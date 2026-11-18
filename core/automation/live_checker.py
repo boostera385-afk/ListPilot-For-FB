@@ -1197,6 +1197,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 "Listing Details": scan["details"],
             })
             post["_live_counts"] = counts
+            post["_live_listings"] = scan["listings"]  # for the PK/US checker visibility pass
             if scan["notes"]:
                 values["Check Result"] = ls.format_check_result("PARTIAL", "; ".join(scan["notes"]))
                 post["_live_check"] = "PARTIAL"
