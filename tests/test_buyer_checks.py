@@ -88,7 +88,7 @@ class BuyerRuntimeTests(unittest.TestCase):
         with mock.patch.object(vc, "sync_playwright", return_value=self.fake_browser()), \
              mock.patch.object(vc, "_goto", return_value=True), \
              mock.patch.object(vc, "_blocked_reason", return_value=""), \
-             mock.patch.object(vc, "_search", return_value=True) as search:
+             mock.patch.object(vc, "_search", return_value="ID") as search:
             results = vc.check_listings("local-debug", "PK", targets, lambda _: None, lambda _: None)
         self.assertEqual(results, [lv.SEARCH, lv.SEARCH, lv.UNCLEAR])
         search.assert_called_once()

@@ -82,3 +82,46 @@ class BuyerTimeTests(unittest.TestCase):
         values = lv.row_columns(targets, {"PK": [lv.SEARCH]}, elapsed=95)
         self.assertIn("Buyer check took 1m 35s", values["Visibility Details"])
         self.assertNotIn("took", lv.row_columns(targets, {"PK": [lv.SEARCH]})["Visibility Details"])
+
+
+class SearchFirstTests(unittest.TestCase):
+    def card(self, href, title, price, place="Houston, TX"):
+        return {"href": href, "text": "\n".join([price, title, place])}
+
+    def test_id_hit_wins_and_text_hit_needs_exact_title_and_price(self):
+        results = [self.card("/marketplace/item/111/", "Roof repair", "$45"),
+                   self.card("/marketplace/item/222/", "Other seller", "$10")]
+        self.assertEqual(lv.match_in_search(results, {"title": "x", "listingId": "111"}), "ID")
+        self.assertEqual(lv.match_in_search(results, {"title": "x", "listingId": "999"}), "")
+        no_id = {"title": "roof REPAIR", "listingId": "", "price": "$45"}
+        self.assertEqual(lv.match_in_search(results, no_id), "TEXT")
+        self.assertEqual(lv.match_in_search(results, dict(no_id, price="$46")), "")
+        self.assertEqual(lv.match_in_search(results, dict(no_id, price="")), "")
+        self.assertEqual(lv.match_in_search(results, dict(no_id, title="Roof")), "")
+
+    def test_a_listing_with_an_id_is_never_text_matched(self):
+        results = [self.card("/marketplace/item/222/", "Roof repair", "$45")]
+        self.assertEqual(lv.match_in_search(results, {"title": "Roof repair", "listingId": "111", "price": "$45"}), "")
+
+    def test_targets_carry_the_price(self):
+        targets, _ = lv.visibility_targets([{"state": "LIVE", "title": "A", "listingId": "", "price": "$45"}])
+        self.assertEqual(targets[0]["price"], "$45")
+
+    def test_summary_and_overall_count_text_matches_as_in_search_but_not_verified(self):
+        states = [lv.SEARCH, lv.TEXT_MATCH, lv.TEXT_MATCH]
+        self.assertEqual(lv.summarize_checker(states), "3/3 in search, 2 by title+price")
+        self.assertTrue(lv.overall_visibility({"PK": states}).startswith("PARTIAL: 2 result(s) matched by title+price"))
+        self.assertEqual(lv.overall_visibility({"PK": [lv.SEARCH, lv.SEARCH]}), "OK")
+        self.assertEqual(lv.overall_visibility({"PK": [lv.NOT_FOUND, lv.SEARCH]}), "NOT_IN_SEARCH: 1 result(s)")
+        self.assertIn("1 not found", lv.summarize_checker([lv.SEARCH, lv.NOT_FOUND]))
+
+    def test_listing_verdict_puts_search_visibility_first(self):
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.SEARCH]), "Visible in search")
+        self.assertEqual(lv.listing_verdict([lv.TEXT_MATCH, lv.TEXT_MATCH]), "Visible (title + price)")
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.LINK_ONLY]), "Visible to some buyers")
+        self.assertEqual(lv.listing_verdict([lv.LINK_ONLY, lv.LINK_ONLY]), "Not in search")
+        self.assertEqual(lv.listing_verdict([lv.NOT_FOUND]), "Not in search")
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.HIDDEN]), "Hidden from a buyer")
+        self.assertEqual(lv.listing_verdict([lv.UNCLEAR]), "Not verified")
+        self.assertEqual(lv.listing_verdict([]), "Not checked")
+        self.assertEqual(lv.state_label(lv.LINK_ONLY), "Link opens, not in search")

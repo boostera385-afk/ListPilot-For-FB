@@ -301,7 +301,7 @@ function formatListPilotSheet_(sheet) {
     }
     if (statusColumns.has(key)) {
       rule(range, key + ":error", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^failed|logged_out|checkpoint|layout_unknown|no_marketplace|timeout|hidden|error|unavailable")', "#FDEBEC", "#A32632");
-      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)partial|not_in_search|action_required|link only|unverified|waiting|claimed|pending")', "#FFF3D6", "#825500");
+      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)partial|not_in_search|action_required|link only|not found|title\\+price|unverified|waiting|claimed|pending")', "#FFF3D6", "#825500");
       rule(range, key + ":off", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(off|skipped|not_checked|no_listings|stopped)")', "#EDF0F5", "#596579");
       rule(range, key + ":ok", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(success|ok)|^[0-9]+/[0-9]+ in search$")', "#E7F5ED", "#175A36");
     }

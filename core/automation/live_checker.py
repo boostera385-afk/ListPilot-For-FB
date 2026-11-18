@@ -406,8 +406,12 @@ _READ_LISTINGS_TABLE_JS = r"""
     const categoryLine = lines.find((line) => /^category:/i.test(line)) || '';
     const last = lines.length > 1 ? lines[lines.length - 1] : '';
     const status = last && last !== title && !/^category:/i.test(last) ? last : '';
-    const link = row.querySelector('a[href*="listing_id="]');
-    const idMatch = link ? (link.getAttribute('href') || '').match(/listing_id=(\d+)/) : null;
+    // Any link in the row may carry the listing ID (listing_id=, item_id= or /marketplace/item/<id>).
+    let listingId = '';
+    for (const a of row.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(/(?:listing_id=|item_id=|\/marketplace\/item\/)(\d{6,})/);
+      if (m) { listingId = m[1]; break; }
+    }
     return {
       index: row.getAttribute('data-index') || '',
       title: title,
@@ -417,7 +421,7 @@ _READ_LISTINGS_TABLE_JS = r"""
       clicks: cellText(row, col.clicks),
       saves: cellText(row, col.saves),
       messages: cellText(row, col.messages),
-      listingId: idMatch ? idMatch[1] : '',
+      listingId: listingId,
     };
   });
 }

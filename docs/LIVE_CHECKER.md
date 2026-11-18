@@ -100,11 +100,13 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 
 - Set them in **Settings -> Live Checker - Checker Profiles**: one Pakistani account, one USA account with a confirmed location. Empty = step skipped.
 - Each checker profile opens **once** per run (PK first, then US) and, for every `LIVE` listing (max 15 per owner row):
-  1. searches Marketplace by the title and looks for the listing ID in the results (title match when there is no ID; scrolls 3 times);
-  2. if not found, opens `marketplace/item/<ID>` directly.
-- Results per listing: `SEARCH` (found in search), `LINK_ONLY` (opens by link but not in search near that account), `HIDDEN` (link says not available), `UNCLEAR`, `ERROR` (checker logged out / checkpoint / failed).
+  1. searches Marketplace by the title (scrolls 3 times) and looks in the results for the exact listing ID. A listing with no ID (older seller pages) is matched only on the exact title **and** exact price shown on a result card;
+  2. if an ID listing is not in the results, opens `marketplace/item/<ID>` to tell "opens by link" from "unavailable". A listing with no ID has no link to try.
+- **Search is the verdict.** A listing counts as visible only if it shows in search; opening by link never counts as visible.
+- Results per listing: `SEARCH` (found in search by listing ID), `TEXT_MATCH` (found in search by title + price, no ID to confirm it), `NOT_FOUND` (searched, not in results, no ID to try the link), `LINK_ONLY` (opens by link but not in search near that account), `HIDDEN` (link says not available), `UNCLEAR`, `ERROR` (checker logged out / checkpoint / failed).
 - Columns written: `PK Check`, `US Check` (e.g. `3/4 in search, 1 link only`), `Visibility` (`OK`, `HIDDEN: n`, `NOT_IN_SEARCH: n`, `PARTIAL: ...`), `Visibility Details` (one line per listing), `Visibility Checked`.
 - Note: search is location based, so a Pakistani account will usually not find US-city listings in search; for it, `LINK_ONLY` is the expected "visible" result and `HIDDEN` is the real warning.
+- **Buyer checks tab** in the app: one row per sampled listing with what the PK and US buyers saw (In search / Link opens, not in search / Not in search / Unavailable / Not verified) and a verdict (Visible in search, Visible to some buyers, Not in search, Hidden from a buyer).
 - Stop works during this step. Checker logged out / checkpoint saves a screenshot to `debug/`.
 
 ## 6b. Time counts and findings

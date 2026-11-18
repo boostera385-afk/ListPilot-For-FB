@@ -18,6 +18,7 @@ from core.automation.live_checker import LIVE_CHECKER_SHEET, capture_diagnostics
 from core.services.sheets_service import update_column_values
 
 SEARCH_SCROLLS = 2
+MARKETPLACE_HOME = "https://www.facebook.com/marketplace/"
 
 _SEARCH_RESULTS_JS = r"""
 () => Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]')).map(a => ({
@@ -105,13 +106,16 @@ def _goto(page, url, sleep):
 
 
 def _search(page, target, sleep, cache=None):
+    """``"ID"`` / ``"TEXT"`` when the listing shows in search, ``""`` when it does not,
+    ``None`` when the results page never loaded (never a confident miss)."""
     key = lv.search_url(target["title"])
     if cache is not None and key in cache:
         cached, complete = cache[key]
-        if lv.found_in_search(cached, target):
-            return True
+        kind = lv.match_in_search(cached, target)
+        if kind:
+            return kind
         if complete:
-            return False
+            return ""
     if not _goto(page, key, sleep):
         return None
     try:
@@ -128,10 +132,11 @@ def _search(page, target, sleep, cache=None):
         except Exception:
             return None
         collected.extend(results)
-        if lv.found_in_search(results, target):
+        kind = lv.match_in_search(collected, target)
+        if kind:
             if cache is not None:
                 cache[key] = (collected, False)
-            return True
+            return kind
         if scroll < SEARCH_SCROLLS:
             try:
                 page.mouse.wheel(0, random.randint(1400, 2200))
@@ -140,7 +145,7 @@ def _search(page, target, sleep, cache=None):
             sleep(random.uniform(0.6, 1.0))
     if cache is not None:
         cache[key] = (collected, True)
-    return False
+    return ""
 
 
 def _open_link(page, target, sleep):
@@ -162,18 +167,18 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
     """One result per target, in order, from one checker browser."""
     results = []
     search_cache, result_cache = {}, {}
-    if not any(target.get("listingId") for target in targets):
+    if not any(target.get("listingId") or target.get("price") for target in targets):
         for _ in targets:
             if on_result:
                 on_result()
-        log(f"[{label} checker] No listing IDs; this sample is unverified. No browser search performed.")
+        log(f"[{label} checker] No listing IDs or prices; this sample is unverified. No browser search performed.")
         return [lv.UNCLEAR] * len(targets)
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(debug_url, timeout=30000)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
         try:
-            _goto(page, "https://www.facebook.com/marketplace/", sleep)
+            _goto(page, MARKETPLACE_HOME, sleep)
             blocked = _blocked_reason(page)
             if blocked:
                 capture_diagnostics(page, f"checker_{label}", log)
@@ -185,19 +190,28 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                     on_detail(label, number, len(targets), target["title"], "Checking")
                 try:
                     listing_id = target.get("listingId")
-                    if not listing_id:
+                    cache_key = listing_id or f"{target['title']}|{target.get('price', '')}"
+                    if not listing_id and not target.get("price"):
                         state = lv.UNCLEAR
-                        log(f"[{label} checker] No listing ID for '{target['title']}'; title-only matches are not verified.")
-                    elif listing_id in result_cache:
-                        state = result_cache[listing_id]
+                        log(f"[{label} checker] No listing ID or price for '{target['title']}'; title-only matches are not verified.")
+                    elif cache_key in result_cache:
+                        state = result_cache[cache_key]
                     else:
-                        found = _search(page, target, sleep, search_cache)
-                        state = lv.SEARCH if found else _open_link(page, target, sleep)
-                        if found is None and state == lv.LINK_ONLY:
+                        # Search is the verdict: a listing counts as visible only if it shows in results.
+                        kind = _search(page, target, sleep, search_cache)
+                        if kind == "ID":
+                            state = lv.SEARCH
+                        elif kind == "TEXT":
+                            state = lv.TEXT_MATCH
+                        elif kind is None:
                             state = lv.UNCLEAR
-                            log(f"[{label} checker] Link opens, but the search page did not finish loading; search visibility is unverified.")
-                    if listing_id and state not in (lv.ERROR, lv.UNCLEAR):
-                        result_cache[listing_id] = state
+                            log(f"[{label} checker] The search page did not finish loading; search visibility is unverified.")
+                        elif listing_id:
+                            state = _open_link(page, target, sleep)  # opens by link but not in search = LINK_ONLY
+                        else:
+                            state = lv.NOT_FOUND  # no ID, so there is no link to try
+                    if state not in (lv.ERROR, lv.UNCLEAR):
+                        result_cache[cache_key] = state
                     if _blocked_reason(page):
                         log(f"[{label} checker] account blocked mid-run; stopping this checker.")
                         results.extend([lv.ERROR] * (len(targets) - len(results)))
@@ -263,8 +277,8 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
         label_start = done[0]
         if stop_event.is_set():
             break
-        if not any(target.get("listingId") for target in flat):
-            log(f"[{label} checker] No exact listing IDs in the sample; skipped browser launch.")
+        if not any(target.get("listingId") or target.get("price") for target in flat):
+            log(f"[{label} checker] No listing IDs or prices in the sample; skipped browser launch.")
             per_label[label] = [lv.UNCLEAR] * len(flat)
             advance(len(flat))
             continue
@@ -299,6 +313,12 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
         own = {label: per_label.get(label, [lv.UNCLEAR] * len(flat))[offset:offset + len(targets)]
                for label, _ in checkers}
         offset += len(targets)
+        # One entry per listing for the app's Buyer checks tab.
+        post["_buyer_rows"] = [
+            {"title": target["title"], "price": target.get("price", ""), "id": target.get("listingId", ""),
+             **{label: own[label][index] if index < len(own[label]) else lv.UNCLEAR for label in own}}
+            for index, target in enumerate(targets)
+        ]
         values = lv.row_columns(targets, own, skipped, disabled={"PK", "US"} - set(own),
                                 elapsed=time.monotonic() - started_at)
         if stop_event.is_set():

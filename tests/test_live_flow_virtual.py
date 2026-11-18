@@ -144,9 +144,44 @@ def _build_page(name):
     return PAGE % {"lang": lang, "body": body, "cfg": json.dumps(payload)}
 
 
+# --- Fake buyer-side Marketplace: search results and listing pages ------------------
+BUYER_SEARCH = {  # query -> [(listing id, price, title)] shown to the buyer
+    "Roof repair": [("111", "$45", "Roof repair")],
+    "Gutter clean": [("555", "$30", "Gutter clean")],
+    "Window wash": [("556", "$25", "Window wash")],
+    "Deck stain": [("900", "$10", "Deck stain cover")],
+    "Fence paint": [("901", "$9", "Fence paint kit")],
+}
+BUYER_ITEMS = {"222": "Deck stain - $40", "333": "This listing isn't available"}
+
+
+def _buyer_page(path_and_query):
+    from urllib.parse import urlparse, parse_qs
+    url = urlparse(path_and_query)
+    segments = url.path.strip("/").split("/")  # buyer / marketplace / search | item / <id>
+    if "search" in segments:
+        query = parse_qs(url.query).get("query", [""])[0]
+        cards = "".join(
+            f'<a href="/marketplace/item/{i}/"><div>{price}</div><div>{title}</div><div>Houston, TX</div></a>'
+            for i, price, title in BUYER_SEARCH.get(query, []))
+        return f"<html><body>{cards or 'No results'}</body></html>"
+    if "item" in segments:
+        listing_id = segments[-1]
+        return f"<html><body><h1>{BUYER_ITEMS.get(listing_id, 'This listing isn' + chr(39) + 't available')}</h1></body></html>"
+    return "<html><body>Marketplace</body></html>"
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = self.path.split("?")[0].strip("/").split("/")
+        if parts and parts[0] == "buyer":
+            data = _buyer_page(self.path).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         name = parts[0] if parts and parts[0] in SCENARIOS else None
         if name is None:
             self.send_response(404)
@@ -288,6 +323,25 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         self.assertTrue(sheet["Check Result"].startswith("PARTIAL"), sheet["Check Result"])
         self.assertIn("unrecognised status", sheet["Check Result"])
         self.assertGreater(sheet["Other Count"], 0)
+
+    def test_buyer_check_uses_search_as_the_verdict(self):
+        from core.automation import listing_visibility as lv
+        from core.automation import visibility_checker as vc
+
+        targets = [
+            {"title": "Roof repair", "listingId": "111", "price": "$45"},    # ID in search results
+            {"title": "Gutter clean", "listingId": "", "price": "$30"},      # no ID: exact title + price in search
+            {"title": "Window wash", "listingId": "", "price": "$20"},       # no ID: only a different price shows
+            {"title": "Deck stain", "listingId": "222", "price": "$40"},     # not in search, but the link opens
+            {"title": "Fence paint", "listingId": "333", "price": "$15"},    # not in search, link says unavailable
+        ]
+        logs = []
+        with mock.patch.object(lv, "FB_SEARCH", self.base + "/buyer/marketplace/search/?query={query}&exact=false"),                 mock.patch.object(lv, "FB_ITEM", self.base + "/buyer/marketplace/item/{id}/"),                 mock.patch.object(vc, "MARKETPLACE_HOME", self.base + "/buyer/marketplace/"):
+            results = vc.check_listings(self.debug_url, "PK", targets, logs.append, lambda seconds: None)
+        self.assertEqual(results, [lv.SEARCH, lv.TEXT_MATCH, lv.NOT_FOUND, lv.LINK_ONLY, lv.HIDDEN], logs[-6:])
+        self.assertEqual(lv.summarize_checker(results),
+                         "2/5 in search, 1 by title+price, 1 link only, 1 not found, 1 unavailable")
+        self.assertTrue(lv.overall_visibility({"PK": results}).startswith("HIDDEN"))
 
     def test_logged_out_is_permanent_and_recorded(self):
         outcome, error, sheet, history, logs, post = self.run_flow("logged_out")

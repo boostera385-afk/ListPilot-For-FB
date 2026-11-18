@@ -34,6 +34,9 @@ MODE_HELP = {
     "all": "Clears every finished row and checks all profiles again.",
 }
 
+BUYER_COLUMNS = ("Profile", "Listing", "Price", "PK", "US", "Verdict")
+BUYER_WEIGHTS = (3, 5, 2, 3, 3, 4)
+
 RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Other", "Total", "PK", "US", "Visibility")
 RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 3, 3, 3)
 
@@ -223,7 +226,7 @@ class LiveCheckerView(ctk.CTkFrame):
                                    segmented_button_selected_color=theme.ACCENT,
                                    segmented_button_selected_hover_color=theme.ACCENT_HOVER)
         self.tabs.grid(row=4, column=0, sticky="nsew", padx=theme.PAD, pady=(0, theme.PAD))
-        for name in ("Results", "Log"):
+        for name in ("Results", "Buyer checks", "Log"):
             tab = self.tabs.add(name)
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
@@ -236,6 +239,13 @@ class LiveCheckerView(ctk.CTkFrame):
             }.get(str(code), str(code))},
         )
         self.table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        # One row per sampled listing: was it found by searching Marketplace as a buyer?
+        self.buyer_table = ResultsTable(
+            self.tabs.tab("Buyer checks"), BUYER_COLUMNS, BUYER_WEIGHTS, min_width=900, entity_name="listing",
+            wraplengths=(120, 240, 60, 140, 140, 150),
+            empty_text="Buyer results appear here after the owner scan, one row per sampled listing.",
+        )
+        self.buyer_table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.log = ColoredLog(self.tabs.tab("Log"))
         self.log.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.tabs.set("Log")
@@ -270,6 +280,7 @@ class LiveCheckerView(ctk.CTkFrame):
     def _reset_dashboard(self):
         self.log.clear()
         self.table.clear()
+        self.buyer_table.clear()
         self.totals, self.done_count, self.visibility_issues = {}, 0, 0
         for card in self.stats.values():
             card.set(0)
@@ -397,7 +408,24 @@ class LiveCheckerView(ctk.CTkFrame):
             self.table.upsert(post.get("rowNumber") or _profile_name(post), {
                 "PK": pk, "US": us, "Visibility": code,
             }, colors={"Visibility": theme.status_color(code)})
+            self._show_buyer_rows(post)
         self.stats["hidden"].set(self.visibility_issues)
+
+    def _show_buyer_rows(self, post):
+        """List each sampled listing with what the PK and US buyers saw in Marketplace search."""
+        for index, item in enumerate(post.get("_buyer_rows") or []):
+            states = [item[label] for label in ("PK", "US") if label in item]
+            verdict = lv.listing_verdict(states)
+            color = (theme.GREEN if verdict.startswith("Visible in search")
+                     else theme.RED if verdict.startswith("Hidden") else theme.AMBER)
+            self.buyer_table.upsert(f"{post.get('rowNumber') or _profile_name(post)}-{index}", {
+                "Profile": _profile_name(post),
+                "Listing": item.get("title") or "Untitled",
+                "Price": item.get("price") or "—",
+                "PK": lv.state_label(item["PK"]) if "PK" in item else "Off",
+                "US": lv.state_label(item["US"]) if "US" in item else "Off",
+                "Verdict": verdict,
+            }, colors={"Verdict": color})
 
     # --- Run ------------------------------------------------------------------------
     def start_automation(self):

@@ -17,6 +17,8 @@ LINK_ONLY = "LINK_ONLY"  # opens by its link but did not show in search
 HIDDEN = "HIDDEN"        # link says the listing is not available
 UNCLEAR = "UNCLEAR"      # page loaded but could not be read
 ERROR = "ERROR"          # checker could not check it (logged out, timeout, ...)
+TEXT_MATCH = "TEXT_MATCH"  # in search by exact title + price; no listing ID to confirm it
+NOT_FOUND = "NOT_FOUND"    # searched, not in the results, and no listing ID to try the link
 
 MAX_TARGETS_PER_PROFILE = 15  # listings verified per owner profile, per checker
 DEFAULT_SAMPLE_SIZE = 3
@@ -89,7 +91,8 @@ def checker_column(label):
 def visibility_targets(listings, limit=MAX_TARGETS_PER_PROFILE):
     """LIVE listings with a title, at most ``limit``, as ``(targets, skipped)``."""
     live = [
-        {"title": _clean(item.get("title")), "listingId": _clean(item.get("listingId"))}
+        {"title": _clean(item.get("title")), "listingId": _clean(item.get("listingId")),
+         "price": _clean(item.get("price"))}
         for item in listings or []
         if (item or {}).get("state") == ls.LIVE and _clean(item.get("title"))
     ]
@@ -130,6 +133,55 @@ def found_in_search(results, target):
     return False
 
 
+def match_in_search(results, target):
+    """How a target shows in search results: ``"ID"``, ``"TEXT"`` or ``""`` (not found).
+
+    ``"ID"`` is an exact Facebook listing-ID hit. ``"TEXT"`` is used only for a
+    listing that has no ID (older seller pages): a result card whose lines hold
+    the exact title and the exact price. It is reported separately because the
+    same seller can have several identical cards.
+    """
+    if found_in_search(results, target):
+        return "ID"
+    if _clean(target.get("listingId")):
+        return ""
+    title = loose_key(target.get("title"))
+    price = _clean(target.get("price")).lower()
+    if not title or not price:
+        return ""
+    for result in results or []:
+        lines = [_clean(line).lower() for line in str(result.get("text") or "").splitlines() if _clean(line)]
+        if price in lines and any(loose_key(line) == title for line in lines):
+            return "TEXT"
+    return ""
+
+
+def state_label(state):
+    """Plain words for one buyer result (used in the app's Buyer checks tab)."""
+    return {
+        SEARCH: "In search", TEXT_MATCH: "In search (title + price)",
+        LINK_ONLY: "Link opens, not in search", NOT_FOUND: "Not in search",
+        HIDDEN: "Unavailable", UNCLEAR: "Not verified", ERROR: "Error",
+    }.get(state, str(state))
+
+
+def listing_verdict(states):
+    """One verdict for a listing from its buyers' results (search visibility first)."""
+    states = list(states)
+    if not states:
+        return "Not checked"
+    found = [s for s in states if s in (SEARCH, TEXT_MATCH)]
+    if HIDDEN in states:
+        return "Hidden from a buyer"
+    if len(found) == len(states):
+        return "Visible in search" if SEARCH in found else "Visible (title + price)"
+    if found:
+        return "Visible to some buyers"
+    if any(s in (LINK_ONLY, NOT_FOUND) for s in states):
+        return "Not in search"
+    return "Not verified"
+
+
 def classify_item_page(url, body_text, title):
     """SEARCH-fallback result for the listing's own page: LINK_ONLY, HIDDEN or UNCLEAR."""
     lowered = _clean(body_text).lower()
@@ -150,8 +202,11 @@ def summarize_checker(results):
     counts = {}
     for state in results:
         counts[state] = counts.get(state, 0) + 1
-    parts = [f"{counts.get(SEARCH, 0)}/{total} in search"]
-    for state, word in ((LINK_ONLY, "link only"), (HIDDEN, "unavailable"), (UNCLEAR, "unverified"), (ERROR, "error")):
+    parts = [f"{counts.get(SEARCH, 0) + counts.get(TEXT_MATCH, 0)}/{total} in search"]
+    if counts.get(TEXT_MATCH):
+        parts.append(f"{counts[TEXT_MATCH]} by title+price")
+    for state, word in ((LINK_ONLY, "link only"), (NOT_FOUND, "not found"), (HIDDEN, "unavailable"),
+                        (UNCLEAR, "unverified"), (ERROR, "error")):
         if counts.get(state):
             parts.append(f"{counts[state]} {word}")
     return ", ".join(parts)
@@ -169,12 +224,15 @@ def overall_visibility(per_checker):
     hidden = sum(1 for s in states if s == HIDDEN)
     if hidden:
         return f"HIDDEN: {hidden} result(s)"
-    link_only = sum(1 for s in states if s == LINK_ONLY)
+    link_only = sum(1 for s in states if s in (LINK_ONLY, NOT_FOUND))
     if link_only:
         return f"NOT_IN_SEARCH: {link_only} result(s)"
     gaps = sum(1 for s in states if s in (UNCLEAR, ERROR))
     if gaps:
         return f"PARTIAL: {gaps} result(s) not checked"
+    text_only = sum(1 for s in states if s == TEXT_MATCH)
+    if text_only:
+        return f"PARTIAL: {text_only} result(s) matched by title+price only (no listing ID)"
     return ls.OK
 
 
@@ -183,6 +241,8 @@ def format_visibility_details(targets, per_checker, max_chars=45000):
     lines = []
     for index, target in enumerate(targets or []):
         parts = [target.get("title") or "Untitled"]
+        if target.get("price"):
+            parts.append(target["price"])
         if target.get("listingId"):
             parts.append(f"ID {target['listingId']}")
         for label, results in per_checker.items():
@@ -214,6 +274,7 @@ def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None):
     if skipped:
         scope += f" {skipped} not checked."
     scope += " Search results depend on the buyer account and Marketplace location."
+    scope += " 'In search' = found by searching Marketplace as a buyer; 'link only' = opens by link but is not in search."
     if elapsed is not None:
         scope += f" Buyer check took {ls.format_duration(elapsed)}."
     values["Visibility Details"] = scope + "\n" + format_visibility_details(targets, per_checker)
