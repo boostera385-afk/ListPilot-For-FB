@@ -72,6 +72,8 @@ IF !ERRORLEVEL! NEQ 0 (
 
 :: 4. Launch the app
 :launch
+:: Keep desktop shortcuts pointing here (old Kitkat name or a renamed folder). Never blocks startup.
+powershell -NoProfile -ExecutionPolicy Bypass -File "core\utils\fix_shortcuts.ps1" -Root "%~dp0." 2>nul
 echo ==========================================
 echo Launching ListPilot...
 echo ==========================================
