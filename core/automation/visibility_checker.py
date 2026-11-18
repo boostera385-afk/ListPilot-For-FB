@@ -299,7 +299,8 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
         own = {label: per_label.get(label, [lv.UNCLEAR] * len(flat))[offset:offset + len(targets)]
                for label, _ in checkers}
         offset += len(targets)
-        values = lv.row_columns(targets, own, skipped, disabled={"PK", "US"} - set(own))
+        values = lv.row_columns(targets, own, skipped, disabled={"PK", "US"} - set(own),
+                                elapsed=time.monotonic() - started_at)
         if stop_event.is_set():
             values["Visibility"] = "STOPPED"
             values["Visibility Details"] = "Stopped by user. Partial/unverified results follow.\n" + values["Visibility Details"]

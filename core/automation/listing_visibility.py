@@ -201,7 +201,7 @@ def visibility_label(code):
     }.get(str(code).split(":")[0], str(code))
 
 
-def row_columns(targets, per_checker, skipped=0, disabled=()):
+def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None):
     """Sheet values for one owner row after both checkers ran."""
     values = {checker_column(label): summarize_checker(results) for label, results in per_checker.items()}
     for label in disabled:
@@ -214,6 +214,8 @@ def row_columns(targets, per_checker, skipped=0, disabled=()):
     if skipped:
         scope += f" {skipped} not checked."
     scope += " Search results depend on the buyer account and Marketplace location."
+    if elapsed is not None:
+        scope += f" Buyer check took {ls.format_duration(elapsed)}."
     values["Visibility Details"] = scope + "\n" + format_visibility_details(targets, per_checker)
     values["Visibility Checked"] = ls.timestamp()
     return values

@@ -29,6 +29,11 @@ buttons that jump to the right page.
 
 After `setupSheets` the sheet has the tabs `FB Listings`, `Dominancy Checker`, `Response Checker` and `Live Checker`.
 
+### Format the sheet (colors and layout)
+- In the Apps Script editor pick `formatListPilotSheets` and click **Run** once. Afterwards the sheet also has a **ListPilot** menu with "Format ListPilot tabs".
+- It adds a coloured header, frozen rows, filters, column widths and green / amber / red / grey status colours. It never changes your data.
+- Safe to run again at any time.
+
 ### Connect the Web App URL
 - In **Settings**, replace **Google Apps Script Web App URL** with the **new** sheet's URL and save.
 - The app reads only the sheet behind this URL, so an old URL keeps reading the old sheet.
@@ -107,7 +112,11 @@ Failed scans leave counts blank rather than reusing an older run's numbers.
 - Click **Stop** while it runs: current rows end as `Failed (Stopped)` and none stays `CLAIMED`.
 - Rows left `CLAIMED` for over an hour (a crashed run) are freed automatically at the next start.
 
+### Time counts
+The Live Checker page shows `phase - mm:ss` while running. The log ends with `Owner scan time`, `Buyer sample finished in ...` and `Total run time`. The sheet has a `Scan Time` column per profile. Please send these numbers back: the buyer step used to take about 9 minutes for 30 checks.
+
 ### Test 5: buyer visibility (optional)
+- In **Settings** use the master switch and the separate PK / US switches, and choose the sample size (Quick 3, Standard 5, Extended 15 listings). This is a sample, not a full audit.
 - With the PK and US checker profiles set, run a check on 1-2 profiles with live listings. Step 2 opens the PK account, then the US account.
 - Read `PK Check`, `US Check`, `Visibility` and `Visibility Details`. `LINK_ONLY` from the PK account is normal for US-city listings; `HIDDEN` is the real warning.
 

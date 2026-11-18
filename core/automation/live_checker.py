@@ -1194,6 +1194,7 @@ def open_selling_from_marketplace_home(page, sleep, log):
 def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, stop_event=None):
     post = post or {}
     options = post.get("_buyer_options") or lv.BuyerOptions.from_settings(load_config())
+    scan_started = time.monotonic()
 
     def log(msg):
         logger(msg)
@@ -1298,6 +1299,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         # A failed read must not make a previous run's counts look freshly verified.
         values = {
             "Check Result": result, "Last Checked": ls.timestamp(),
+            "Scan Time": ls.format_duration(time.monotonic() - scan_started),
             "Total Listings": "", "Live Count": "", "Pending Count": "", "Rejected Count": "",
             "Other Count": "", "Status Summary": "", "Listing Details": "",
             "All Listings": "", "Needs Attention": "",
@@ -1314,13 +1316,15 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
     def save_results(all_summary, needs_summary, scan):
         log(f"All listings: {all_summary}")
         log(f"Needs attention: {needs_summary}")
-        values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp()}
+        values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp(),
+                  "Scan Time": ls.format_duration(time.monotonic() - scan_started)}
         values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE))))
         headline = ""
         if scan and scan["total"]:
             counts = scan["counts"]
             headline = scan["headline"]
-            log(f"Full scan: {headline} ({scan['total']} listings; tabs: {scan['tabCounts']})")
+            log(f"Full scan: {headline} ({scan['total']} listings; tabs: {scan['tabCounts']}) in "
+                f"{ls.format_duration(time.monotonic() - scan_started)}")
             values.update({
                 "Total Listings": scan["total"],
                 "Live Count": counts.get(ls.LIVE, 0),

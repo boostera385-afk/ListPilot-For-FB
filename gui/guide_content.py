@@ -45,6 +45,13 @@ SECTIONS = (
             "action": ("Open Script Builder", "script"),
         },
         {
+            "id": "format", "title": "Format the sheet (colors and layout)",
+            "body": "In the Apps Script editor pick formatListPilotSheets and click Run once. Afterwards the sheet "
+                    "has a ListPilot menu with 'Format ListPilot tabs'.\n"
+                    "It adds a coloured header, frozen rows, filters, column widths and green / amber / red / grey "
+                    "status colours. It never changes your data and is safe to run again.",
+        },
+        {
             "id": "url", "title": "Connect the Web App URL",
             "body": "In Settings, replace the 'Google Apps Script Web App URL' with the NEW sheet's URL and save. "
                     "The app reads only the sheet behind this URL, so an old URL keeps reading the old sheet.",

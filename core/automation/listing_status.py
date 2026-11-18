@@ -233,5 +233,15 @@ def format_check_result(code, detail=""):
     return f"{code}: {detail}" if detail and code != OK else code
 
 
+def format_duration(seconds):
+    """'45s', '1m 42s' or '1h 05m' for a time count shown in the sheet and log."""
+    seconds = max(0, int(round(float(seconds or 0))))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
 def timestamp(now=None):
     return (now or datetime.now()).strftime("%Y-%m-%d %H:%M")

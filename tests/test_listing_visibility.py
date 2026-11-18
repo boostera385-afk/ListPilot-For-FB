@@ -74,3 +74,11 @@ class RowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuyerTimeTests(unittest.TestCase):
+    def test_row_columns_reports_how_long_the_buyer_check_took(self):
+        targets = [{"title": "A", "listingId": "1"}]
+        values = lv.row_columns(targets, {"PK": [lv.SEARCH]}, elapsed=95)
+        self.assertIn("Buyer check took 1m 35s", values["Visibility Details"])
+        self.assertNotIn("took", lv.row_columns(targets, {"PK": [lv.SEARCH]})["Visibility Details"])

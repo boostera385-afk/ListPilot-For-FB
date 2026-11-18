@@ -40,7 +40,7 @@ function setCellSafely_(range, value) {
 // "Responses" = messages on the just-published listing (from the live check).
 // "All Listings" / "Needs Attention" = the first listing of each tab.
 const AUTO_COLUMNS = {};
-const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count", "Status Summary", "Listing Details", "Check Result", "Last Checked"];
+const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count", "Status Summary", "Listing Details", "Check Result", "Last Checked", "Scan Time"];
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
 // Buyer-side check from the Pakistani and USA checker accounts.
 const VISIBILITY_COLUMNS = ["PK Check", "US Check", "Visibility", "Visibility Details", "Visibility Checked"];
@@ -144,6 +144,8 @@ function ensureColumn_(sheet, name) {
     if (idx !== -1) return idx + 1;
     const column = sheet.getLastColumn() + 1;
     sheet.getRange(1, column).setValue(name).setFontWeight("bold");
+    // New columns match the existing header look instead of appearing plain.
+    if (column > 1) sheet.getRange(1, column - 1).copyFormatToRange(sheet, column, column, 1, 1);
     return column;
   } finally {
     lock.releaseLock();
@@ -232,7 +234,8 @@ function formatListPilotSheet_(sheet) {
   if (rows < 2) return;
 
   const body = sheet.getRange(2, 1, rows - 1, columns);
-  body.setNumberFormat("@").setWrap(true).setHorizontalAlignment("left");
+  // Plain text only for typed-in identifiers; counts, dates and any formulas keep their own format.
+  body.setWrap(true).setHorizontalAlignment("left");
   // Keep logs/details readable without letting a 40-line cell fill the screen.
   sheet.setRowHeightsForced(2, rows - 1, 42);
 
@@ -278,6 +281,7 @@ function formatListPilotSheet_(sheet) {
         key === "rejectedcount" || key === "rejected" ? "#A32632" : "#175A36");
     } else if (key === "id") {
       sheet.setColumnWidth(column, 290);
+      range.setNumberFormat("@");  // long profile/listing IDs must never become 1.2E+15
     } else if (key === "profilename" || key === "profile") {
       sheet.setColumnWidth(column, 210);
     } else if (key.includes("detail") || key === "description") {
@@ -288,6 +292,9 @@ function formatListPilotSheet_(sheet) {
       sheet.setColumnWidth(column, 300);
     } else if (key === "visibility" || key === "pkcheck" || key === "uscheck") {
       sheet.setColumnWidth(column, 240);
+    } else if (key === "scantime") {
+      sheet.setColumnWidth(column, 110);
+      range.setHorizontalAlignment("center");
     } else if (key === "lastchecked" || key === "visibilitychecked" || key === "time") {
       sheet.setColumnWidth(column, 185);
       if (key === "time") range.setNumberFormat("yyyy-mm-dd hh:mm");

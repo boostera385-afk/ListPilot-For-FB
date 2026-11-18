@@ -107,6 +107,10 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 - Note: search is location based, so a Pakistani account will usually not find US-city listings in search; for it, `LINK_ONLY` is the expected "visible" result and `HIDDEN` is the real warning.
 - Stop works during this step. Checker logged out / checkpoint saves a screenshot to `debug/`.
 
+## 6b. Time counts and findings
+
+`Scan Time` (sheet), `Owner scan time` / `Total run time` (log) and the live `phase - mm:ss` line show where time goes. Real-account findings, fixes and open items are in `docs/LIVE_TEST_FINDINGS.md`.
+
 ## 7. Apps Script
 
 File: `core/assets/apps_script.js`. **Redeploy after any change** (Extensions -> Apps Script -> paste -> run `setupSheets` once -> Deploy -> New version).

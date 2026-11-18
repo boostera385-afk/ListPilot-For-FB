@@ -5,7 +5,7 @@ from core.engine.grouped_automation_engine import GroupedAutomationEngine
 from core.services.sheets_service import fetch_pending_rows, reset_rows_for_recheck
 from core.automation.browser_manager import is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label
 from core.automation.live_checker import run_live_checker_flow, LIVE_CHECKER_SHEET
-from core.automation.listing_status import format_counts, other_count
+from core.automation.listing_status import format_counts, format_duration, other_count
 from core.automation.visibility_checker import configured_checkers, run_visibility_checks, buyer_options, validate_checker_roles
 from core.automation import listing_visibility as lv
 from core.engine.automation_control import AutomationControl
@@ -540,7 +540,13 @@ class LiveCheckerView(ctk.CTkFrame):
                       f"{self.total_count} / {self.total_count} processed" +
                       (f" · {attention} need attention" if attention else ""),
                       theme.AMBER if attention else theme.GREEN)
+            owner_seconds = time.monotonic() - self._started_at if self._started_at else 0
+            run_on_ui(self.append_log, f"Owner scan time: {format_duration(owner_seconds)}")
             self._run_visibility_pass(posts, logger_proxy, master_ui_context)
+            total_seconds = time.monotonic() - self._started_at if self._started_at else 0
+            run_on_ui(self.append_log, f"Total run time: {format_duration(total_seconds)} "
+                                       f"(owner scan {format_duration(owner_seconds)}, "
+                                       f"buyer sample {format_duration(max(0, total_seconds - owner_seconds))})")
             self.is_processing = False
             run_on_ui(self.update_start_button)
             toast(f"Live check finished: {format_counts(totals)}", theme.GREEN if not issues else theme.AMBER)

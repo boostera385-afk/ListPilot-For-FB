@@ -149,3 +149,13 @@ class ScanQualityTests(unittest.TestCase):
         self.assertIn(ls.LAYOUT_UNKNOWN, ls.RETRYABLE_CODES)
         for code in (ls.LOGGED_OUT, ls.CHECKPOINT, ls.NO_LISTINGS, ls.LANG_NOT_EN, ls.NO_MARKETPLACE):
             self.assertNotIn(code, ls.RETRYABLE_CODES)
+
+
+class DurationTests(unittest.TestCase):
+    def test_format_duration(self):
+        self.assertEqual(ls.format_duration(0), "0s")
+        self.assertEqual(ls.format_duration(45.4), "45s")
+        self.assertEqual(ls.format_duration(102), "1m 42s")
+        self.assertEqual(ls.format_duration(3900), "1h 05m")
+        self.assertEqual(ls.format_duration(None), "0s")
+        self.assertEqual(ls.format_duration(-5), "0s")
