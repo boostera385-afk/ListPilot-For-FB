@@ -1,11 +1,10 @@
 import customtkinter as ctk
 import threading
 from core.engine.grouped_automation_engine import GroupedAutomationEngine
-from core.services.sheets_service import fetch_pending_rows, update_row_status
-from core.automation.browser_manager import start_profile, stop_profile, is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, update_profile_proxy, provider_label
-from core.automation.profile_builder import get_val
+from core.services.sheets_service import fetch_pending_rows
+from core.automation.browser_manager import is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label
 from core.automation.response_checker import run_response_checker_flow
-from core.utils.app_logger import log_event
+from gui.automation_dashboard import AutomationDashboard
 from gui.ui_helpers import run_on_ui
 
 
@@ -25,100 +24,32 @@ def _parse_concurrency(value, default=3):
     return clamped, None
 
 
-class ResponseCheckerView(ctk.CTkFrame):
+class ResponseCheckerView(AutomationDashboard):
     def __init__(self, master, **kwargs):
-        super().__init__(master, **kwargs)
-
-        self.grid_rowconfigure(2, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
-        header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
-
-        self.title_label = ctk.CTkLabel(header_frame, text="Response Checker", font=ctk.CTkFont(size=24, weight="bold"))
-        self.title_label.pack(side="left")
-
-        controls_frame = ctk.CTkFrame(self, fg_color="transparent")
-        controls_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        controls_frame.grid_columnconfigure(5, weight=1)
-
-        self.start_btn = ctk.CTkButton(controls_frame, text="Start Response Check", command=self.start_automation, 
-                                       width=180, height=35, font=ctk.CTkFont(weight="bold"))
-        self.start_btn.grid(row=0, column=0, padx=(0, 10))
-
-        self.stop_btn = ctk.CTkButton(controls_frame, text="Stop Automation", command=self.stop_automation,
-                                      fg_color="#D9534F", hover_color="#C9302C", width=130, height=35,
-                                      state="disabled")
-        self.stop_btn.grid(row=0, column=1, padx=(0, 10))
-
-        self.continue_btn = ctk.CTkButton(controls_frame, text="Continue", command=self.continue_automation,
-                                          width=90, height=35, state="disabled")
-        self.continue_btn.grid(row=0, column=2, padx=(0, 20))
-
-        # Concurrency Spinbox
-        ctk.CTkLabel(controls_frame, text="Profiles at a time:").grid(row=0, column=3, padx=(0, 5))
-        self.concurrency_var = ctk.StringVar(value="3")
-        self.concurrency_entry = ctk.CTkEntry(controls_frame, textvariable=self.concurrency_var, width=50)
-        self.concurrency_entry.grid(row=0, column=4, padx=(0, 20))
-
-        # Keep open checkbox
+        super().__init__(
+            master, title="Response Checker", sheet_name="Response Checker", concurrency=3,
+            description="Check pending profiles for Marketplace responses. Results are saved to the "
+                        "'Response Checker' sheet; profiles with responses can stay open for follow-up.",
+            start_text="▶  Start Response Check", start_command=self.start_automation, **kwargs,
+        )
         self.keep_open_var = ctk.BooleanVar(value=True)
-        self.keep_open_checkbox = ctk.CTkCheckBox(controls_frame, text="Keep profile open if response found", variable=self.keep_open_var)
-        self.keep_open_checkbox.grid(row=0, column=5, sticky="w")
-
-        self.log_box = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
-        self.log_box.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="nsew")
-        self.log_box.configure(state="disabled")
-
-        self.engine = None
-        self.is_processing = False
-        self.total_count = 0
-        self.success_count = 0
-
-    def append_log(self, text):
-        log_event(text)
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
-        self.update_idletasks()
+        self.keep_open_checkbox = self.add_option("Keep profile open if response found", self.keep_open_var)
 
     def update_start_button(self):
-        def _update():
-            engine_running = bool(self.engine and self.engine.is_running)
-            paused = bool(engine_running and self.engine.is_paused)
-            if self.is_processing or engine_running:
-                label = "Paused" if paused else "Running"
-                self.start_btn.configure(text=f"{label} ({self.success_count}/{self.total_count})", state="disabled")
-                self.stop_btn.configure(state="disabled" if paused or not engine_running else "normal")
-                self.continue_btn.configure(state="normal" if paused else "disabled")
-                self.concurrency_entry.configure(state="disabled")
-                self.keep_open_checkbox.configure(state="disabled")
-            else:
-                self.start_btn.configure(text="Start Response Check", state="normal")
-                self.stop_btn.configure(state="disabled")
-                self.continue_btn.configure(state="disabled")
-                self.concurrency_entry.configure(state="normal")
-                self.keep_open_checkbox.configure(state="normal")
-
-        run_on_ui(_update)
+        run_on_ui(self._sync_run_controls)
 
     def start_automation(self):
-        if self.is_processing or (self.engine and self.engine._is_running):
+        if self.is_processing or (self.engine and self.engine.is_running):
             return
 
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_box.configure(state="disabled")
+        self.clear_log()
 
         keep_open = self.keep_open_var.get()
         concurrency, concurrency_warning = _parse_concurrency(self.concurrency_var.get())
+        self.concurrency_var.set(str(concurrency))
         master_ui_context = self.winfo_toplevel()
 
-        self.is_processing = True
-        self.start_btn.configure(text="Preparing...", state="disabled")
-        self.stop_btn.configure(state="disabled")
-        self.continue_btn.configure(state="disabled")
+        self._begin_run([])
         self.append_log("Fetching pending rows from 'Response Checker' sheet...")
         if concurrency_warning:
             self.append_log(f"Warning: {concurrency_warning}")
@@ -131,27 +62,24 @@ class ResponseCheckerView(ctk.CTkFrame):
 
     def _prepare_and_run(self, keep_open, concurrency, master_ui_context):
         def logger_proxy(msg):
-            run_on_ui(self.append_log, msg)
+            self.append_log(msg)
 
         try:
             success, result = fetch_pending_rows("Response Checker")
         except Exception as exc:
             logger_proxy(f"ERROR: Failed to fetch pending tasks: {exc}")
-            self.is_processing = False
-            run_on_ui(self.update_start_button)
+            run_on_ui(self._preparation_failed, "Fetch failed – see Log")
             return
 
         if not success:
             logger_proxy(f"ERROR: {result}")
-            self.is_processing = False
-            run_on_ui(self.update_start_button)
+            run_on_ui(self._preparation_failed, "Fetch failed – see Log")
             return
 
         posts = list(result or [])
         if not posts:
             logger_proxy("No pending tasks found.")
-            self.is_processing = False
-            run_on_ui(self.update_start_button)
+            run_on_ui(self._no_pending_rows)
             return
 
         concurrency = min(concurrency, len(posts))
@@ -162,28 +90,25 @@ class ResponseCheckerView(ctk.CTkFrame):
 
         logger_proxy(f"Found {len(posts)} profiles to check. Using concurrency: {concurrency}")
 
-        self.success_count = 0
-        self.total_count = len(posts)
+        run_on_ui(self._show_posts, posts)
         self.engine = GroupedAutomationEngine(max_workers=concurrency)
 
         def flow_wrapper(debug_url, post, logger, state_callback=None, stop_event=None):
-            return run_response_checker_flow(
+            result = run_response_checker_flow(
                 debug_url=debug_url,
                 post=post,
                 logger=logger,
                 state_callback=state_callback,
                 stop_event=stop_event
             )
+            return self.capture_result(post, result)
 
         def on_completion(post, success):
-            if success:
-                self.success_count += 1
-            run_on_ui(self.update_start_button)
+            run_on_ui(self._on_post_done, post, success)
 
         def on_finished():
-            self.is_processing = False
-            run_on_ui(self.update_start_button)
-            run_on_ui(self.append_log, "--- All Response Checks Completed ---")
+            run_on_ui(self._finish_run)
+            self.append_log("--- All Response Checks Completed ---")
 
         self._run_engine_thread(
             posts,
@@ -203,21 +128,18 @@ class ResponseCheckerView(ctk.CTkFrame):
                 launched, launch_msg = launch_incogniton()
                 if not launched:
                     logger_proxy(f"Failed to launch {label}: {launch_msg}")
-                    self.is_processing = False
-                    run_on_ui(self.update_start_button)
+                    run_on_ui(self._preparation_failed, "Launch failed")
                     return
 
             logger_proxy(f"Verifying that the {label} API is ready...")
             ready, ready_msg = wait_for_incogniton_ready(timeout=60, logger_callback=logger_proxy)
             if not ready:
                 logger_proxy(f"{label} did not become ready: {ready_msg}")
-                self.is_processing = False
-                run_on_ui(self.update_start_button)
+                run_on_ui(self._preparation_failed, "Launch timeout")
                 return
         except Exception as exc:
             logger_proxy(f"Failed while preparing {label}: {exc}")
-            self.is_processing = False
-            run_on_ui(self.update_start_button)
+            run_on_ui(self._preparation_failed, "Browser error")
             return
 
         started = self.engine.start(
@@ -230,12 +152,6 @@ class ResponseCheckerView(ctk.CTkFrame):
             on_finished_callback=on_finished
         )
         if started:
-            run_on_ui(self.update_start_button)
-
-    def stop_automation(self):
-        if self.engine and self.engine.pause(logger_callback=lambda msg: run_on_ui(self.append_log, msg)):
-            self.update_start_button()
-
-    def continue_automation(self):
-        if self.engine and self.engine.resume(logger_callback=lambda msg: run_on_ui(self.append_log, msg)):
-            self.update_start_button()
+            run_on_ui(self._sync_run_controls)
+        else:
+            run_on_ui(self._preparation_failed, "Could not start – see Log")

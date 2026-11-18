@@ -65,16 +65,16 @@ class Chip(ctk.CTkLabel):
 class StatCard(Card):
     """Big animated number with a colored accent bar."""
 
-    def __init__(self, master, title, color=theme.ACCENT, **kwargs):
+    def __init__(self, master, title, color=theme.ACCENT, compact=False, **kwargs):
         super().__init__(master, **kwargs)
         self.grid_columnconfigure(1, weight=1)
         ctk.CTkFrame(self, width=4, height=10, corner_radius=2, fg_color=color).grid(
             row=0, column=0, rowspan=2, sticky="ns", padx=(12, 10), pady=14
         )
-        self.value = ctk.CTkLabel(self, text="0", font=theme.font(26, "bold"), text_color=theme.TEXT, anchor="w")
-        self.value.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(12, 0))
-        ctk.CTkLabel(self, text=title, font=theme.font(12), text_color=theme.TEXT_MUTED, anchor="w").grid(
-            row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 12)
+        self.value = ctk.CTkLabel(self, text="0", font=theme.font(22 if compact else 26, "bold"), text_color=theme.TEXT, anchor="w")
+        self.value.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(8 if compact else 12, 0))
+        ctk.CTkLabel(self, text=title, font=theme.font(11 if compact else 12), text_color=theme.TEXT_MUTED, anchor="w").grid(
+            row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 8 if compact else 12)
         )
 
     def set(self, value):
@@ -99,11 +99,13 @@ class StepProgress(ctk.CTkFrame):
         self.bar.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.bar.set(0)
         self._color = color
+        self._number = str(number)
 
     def reset(self, text="Waiting"):
         self.bar.set(0)
         self.counter.configure(text=text)
-        self.badge.configure(fg_color=theme.SURFACE_ALT, text_color=theme.TEXT_MUTED, text=self.badge.cget("text"))
+        self.badge.configure(fg_color=theme.SURFACE_ALT, text_color=theme.TEXT_MUTED, text=self._number)
+        self.bar.configure(progress_color=self._color)
 
     def update_progress(self, done, total, suffix=""):
         fraction = (done / total) if total else 0
@@ -111,10 +113,12 @@ class StepProgress(ctk.CTkFrame):
         self.counter.configure(text=f"{done} / {total}{suffix}")
         self.badge.configure(fg_color=self._color, text_color="#FFFFFF")
 
-    def finish(self, text="Done"):
+    def finish(self, text="Done", color=None):
         anim.progress_to(self.bar, 1.0)
         self.counter.configure(text=text)
-        self.badge.configure(fg_color=theme.GREEN, text_color="#FFFFFF", text="✓")
+        self.badge.configure(fg_color=color or theme.GREEN, text_color="#FFFFFF",
+                             text="!" if color in (theme.AMBER, theme.RED) else "✓")
+        self.bar.configure(progress_color=color or theme.GREEN)
 
 
 class NumberStepper(ctk.CTkFrame):
@@ -230,13 +234,17 @@ class ColoredLog(ctk.CTkFrame):
 class ResultsTable(ctk.CTkFrame):
     """One row per profile, updated in place, with a search filter."""
 
-    def __init__(self, master, columns, weights=None, **kwargs):
+    def __init__(self, master, columns, weights=None, *, entity_name="profile", empty_text=None,
+                 wraplengths=None, min_width=None, display_formatters=None, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self.columns = columns
         self.weights = weights or [1] * len(columns)
+        self.entity_name = entity_name
+        self.wraplengths = wraplengths
+        self.display_formatters = display_formatters or {}
         self.rows = {}
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(1 if min_width else 2, weight=1)
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -246,21 +254,36 @@ class ResultsTable(ctk.CTkFrame):
                                    height=32, fg_color=theme.SURFACE_ALT, border_width=0, font=theme.font(12))
         self.search.grid(row=0, column=0, sticky="ew")
         self.search.bind("<KeyRelease>", lambda _e: self._apply_filter())
-        self.count_label = ctk.CTkLabel(top, text="0 profiles", text_color=theme.TEXT_MUTED, font=theme.font(12))
+        self.count_label = ctk.CTkLabel(top, text=f"0 {entity_name}s", text_color=theme.TEXT_MUTED, font=theme.font(12))
         self.count_label.grid(row=0, column=1, padx=(12, 0))
 
-        header = ctk.CTkFrame(self, fg_color=theme.SURFACE_ALT, corner_radius=theme.RADIUS_SM)
-        header.grid(row=1, column=0, sticky="ew")
+        table_host, header_row, body_row = self, 1, 2
+        if min_width:
+            self.horizontal = ctk.CTkScrollableFrame(self, orientation="horizontal", fg_color="transparent",
+                                                    corner_radius=0, height=100)
+            self.horizontal.grid(row=1, column=0, sticky="nsew")
+            self.horizontal.grid_columnconfigure(0, weight=1)
+            self.horizontal.grid_rowconfigure(0, weight=1)
+            table_host = ctk.CTkFrame(self.horizontal, width=min_width, height=120, fg_color="transparent")
+            table_host.grid(row=0, column=0, sticky="nsew")
+            table_host.grid_propagate(False)
+            table_host.grid_columnconfigure(0, weight=1)
+            table_host.grid_rowconfigure(1, weight=1)
+            self.bind("<Configure>", lambda event: table_host.configure(
+                width=max(min_width, self._reverse_widget_scaling(event.width) - 16)))
+            header_row, body_row = 0, 1
+        header = ctk.CTkFrame(table_host, fg_color=theme.SURFACE_ALT, corner_radius=theme.RADIUS_SM)
+        header.grid(row=header_row, column=0, sticky="ew", padx=(0, 14) if min_width else 0)
         self._configure_columns(header)
         for index, name in enumerate(columns):
             ctk.CTkLabel(header, text=name.upper(), font=theme.font(11, "bold"), text_color=theme.TEXT_MUTED,
-                         anchor="w").grid(row=0, column=index, sticky="w", padx=10, pady=8)
+                         anchor="w").grid(row=0, column=index, sticky="w", padx=6 if wraplengths else 10, pady=8)
 
-        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.body.grid(row=2, column=0, sticky="nsew")
+        self.body = ctk.CTkScrollableFrame(table_host, fg_color="transparent")
+        self.body.grid(row=body_row, column=0, sticky="nsew")
         self.body.grid_columnconfigure(0, weight=1)
 
-        self.empty = ctk.CTkLabel(self.body, text="Results appear here while the check runs.",
+        self.empty = ctk.CTkLabel(self.body, text=empty_text or "Results appear here while the check runs.",
                                   text_color=theme.TEXT_MUTED, font=theme.font(13))
         self.empty.grid(row=0, column=0, pady=40)
 
@@ -273,7 +296,7 @@ class ResultsTable(ctk.CTkFrame):
             row["frame"].destroy()
         self.rows = {}
         self.empty.grid(row=0, column=0, pady=40)
-        self.count_label.configure(text="0 profiles")
+        self.count_label.configure(text=f"0 {self.entity_name}s")
 
     def upsert(self, key, values, colors=None):
         """Add or update a row. ``colors`` maps column name -> text color."""
@@ -287,17 +310,19 @@ class ResultsTable(ctk.CTkFrame):
             cells = []
             for index, _ in enumerate(self.columns):
                 cell = ctk.CTkLabel(frame, text="", anchor="w", font=theme.font(12), text_color=theme.TEXT)
-                cell.grid(row=0, column=index, sticky="w", padx=10, pady=6)
+                if self.wraplengths:
+                    cell.configure(wraplength=self.wraplengths[index], justify="left")
+                cell.grid(row=0, column=index, sticky="w", padx=6 if self.wraplengths else 10, pady=6)
                 cells.append(cell)
             frame.bind("<Enter>", lambda _e, f=frame: f.configure(fg_color=theme.SURFACE_ALT))
             frame.bind("<Leave>", lambda _e, f=frame: f.configure(fg_color=theme.SURFACE))
             row = {"frame": frame, "cells": cells, "values": {}}
             self.rows[key] = row
-            self.count_label.configure(text=f"{len(self.rows)} profile" + ("" if len(self.rows) == 1 else "s"))
+            self.count_label.configure(text=f"{len(self.rows)} {self.entity_name}" + ("" if len(self.rows) == 1 else "s"))
         row["values"].update(values)
         for index, name in enumerate(self.columns):
             if name in values:
-                text = str(values[name])
+                text = str(self.display_formatters.get(name, str)(values[name]))
                 row["cells"][index].configure(
                     text=text if len(text) <= 60 else text[:57] + "...",
                     text_color=colors.get(name, theme.TEXT),

@@ -4,6 +4,8 @@ from core.config import get_setting, set_setting
 from core.automation.browser_manager import provider_label
 from gui import theme
 from gui import animations as anim
+from gui.branding import set_window_icon
+from gui.connection_monitor import ConnectionMonitor, STATUS_COLORS
 from gui.widgets import Chip
 from gui.views.home_view import HomeView
 from gui.views.settings_view import SettingsView
@@ -101,6 +103,7 @@ class NavButton(ctk.CTkFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=theme.BG)
+        set_window_icon(self)
         ctk.set_appearance_mode(get_setting("appearance_mode", "system") or "system")
 
         self.title(f"{theme.APP_NAME} – {theme.TAGLINE}")
@@ -137,6 +140,7 @@ class App(ctk.CTk):
 
         # Deliver UI updates queued by automation threads.
         start_ui_pump(self)
+        self.connection_monitor = ConnectionMonitor(self._update_connections)
         self._poll_status()
 
     # --- Layout ------------------------------------------------------------------
@@ -181,17 +185,20 @@ class App(ctk.CTk):
         header.grid_columnconfigure(0, weight=1)
         self.crumb = ctk.CTkLabel(header, text="", font=theme.font(13), text_color=theme.TEXT_MUTED, anchor="w")
         self.crumb.grid(row=0, column=0, sticky="w")
-        self.provider_chip = Chip(header, provider_label(), theme.BLUE)
-        self.provider_chip.grid(row=0, column=1, padx=(0, 8))
-        self.sheets_chip = Chip(header, "Sheets")
-        self.sheets_chip.grid(row=0, column=2, padx=(0, 12))
+        self.connection_header = ctk.CTkFrame(header, fg_color="transparent")
+        self.connection_header.grid(row=0, column=1, sticky="e", padx=(0, 12))
+        self.provider_chip = Chip(self.connection_header, f"{provider_label()}: Checking...", theme.AMBER)
+        self.provider_chip.grid(row=0, column=0, padx=(0, 8))
+        self.sheets_chip = Chip(self.connection_header, "Sheets: Checking...", theme.AMBER)
+        self.sheets_chip.grid(row=0, column=1)
         self.mode_switch = ctk.CTkSegmentedButton(
             header, values=list(APPEARANCE), command=self.set_appearance, font=theme.font(12),
             selected_color=theme.ACCENT, selected_hover_color=theme.ACCENT_HOVER,
         )
         saved = str(get_setting("appearance_mode", "system") or "system").lower()
         self.mode_switch.set(next((k for k, v in APPEARANCE.items() if v == saved), "System"))
-        self.mode_switch.grid(row=0, column=3)
+        self.mode_switch.grid(row=0, column=2, sticky="e")
+        header.bind("<Configure>", self._layout_connection_header)
 
         self.page_host = ctk.CTkFrame(main, corner_radius=0, fg_color=theme.BG)
         self.page_host.grid(row=1, column=0, sticky="nsew")
@@ -238,6 +245,23 @@ class App(ctk.CTk):
             self.sidebar.configure(width=end)
 
     # --- Appearance and status -------------------------------------------------------
+    def _layout_connection_header(self, event):
+        header = self.connection_header.master
+        if header._reverse_widget_scaling(event.width) < 1000:
+            self.connection_header.grid_configure(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        else:
+            self.connection_header.grid_configure(row=0, column=1, columnspan=1, sticky="e", pady=0)
+
+    def refresh_connections(self):
+        self.connection_monitor.poll(force=True)
+
+    def _update_connections(self, settings, statuses, checking):
+        for key, name, chip in (("browser", settings.provider_name, self.provider_chip),
+                                ("sheets", "Sheets", self.sheets_chip)):
+            status = statuses[key]
+            chip.set(f"{name}: {status.label}", STATUS_COLORS[status.state])
+        self.views["home"].update_connections(settings, statuses, checking)
+
     def set_appearance(self, label):
         mode = APPEARANCE.get(label, "system")
         if self.mode_switch.get() != label:
@@ -256,14 +280,11 @@ class App(ctk.CTk):
             self.nav[key].set_busy(view_is_busy(view))
         self._status_ticks = getattr(self, "_status_ticks", 0) + 1
         if self._status_ticks % 5 == 1:  # config is a file read; every ~3 s is plenty
-            self.provider_chip.set(provider_label(), theme.BLUE)
-            if get_setting("apps_script_url", ""):
-                self.sheets_chip.set("Sheets linked", theme.GREEN)
-            else:
-                self.sheets_chip.set("Sheets not set", theme.RED)
+            self.connection_monitor.poll()
         self.after(600, self._poll_status)
 
     def _on_close(self):
+        self.connection_monitor.close()
         try:
             if self.state() == "normal":
                 set_setting("window_geometry", self.geometry())

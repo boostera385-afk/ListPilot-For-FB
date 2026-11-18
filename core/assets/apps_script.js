@@ -187,10 +187,137 @@ function setupSheets() {
     }
     ensureAutoColumns_(sheet);
   });
+  formatListPilotSheets();
+}
+
+/**
+ * Run once after pasting this script, or use the ListPilot menu in the sheet.
+ * Formatting only: never clears cells, rewrites values/formulas, or touches Sheet1.
+ */
+function formatListPilotSheets() {
+  const names = [SHEET_FB_LISTING, SHEET_DOMINANCY_CHECKER, SHEET_RESPONSE_CHECKER, SHEET_LIVE_CHECKER, SHEET_LIVE_HISTORY];
+  const formatted = [];
+  names.forEach(name => {
+    const sheet = getSheet_(name);
+    if (!sheet || sheet.getLastColumn() < 1) return;
+    formatListPilotSheet_(sheet);
+    formatted.push(sheet.getName());
+  });
+  console.log("ListPilot formatting applied: " + formatted.join(", "));
+  return formatted;
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu("ListPilot")
+    .addItem("Format ListPilot tabs", "formatListPilotSheets")
+    .addItem("Set up missing tabs and columns", "setupSheets")
+    .addToUi();
+}
+
+function formatListPilotSheet_(sheet) {
+  const headers = getHeaders_(sheet);
+  const columns = headers.length;
+  const rows = sheet.getMaxRows();
+  const header = sheet.getRange(1, 1, 1, columns);
+  const all = sheet.getRange(1, 1, rows, columns);
+  all.setFontFamily("Arial").setFontSize(11).setFontColor("#172033").setVerticalAlignment("middle");
+  header.setBackground("#274690").setFontColor("#FFFFFF").setFontWeight("bold")
+    .setWrap(true).setHorizontalAlignment("left");
+  sheet.setRowHeight(1, 44);
+  sheet.setFrozenRows(1);
+  sheet.setFrozenColumns(Math.min(2, columns));
+  sheet.setTabColor("#3D5AFE");
+  sheet.setColumnWidths(1, columns, 150);
+  if (!sheet.getFilter()) all.createFilter();
+  if (rows < 2) return;
+
+  const body = sheet.getRange(2, 1, rows - 1, columns);
+  body.setNumberFormat("@").setWrap(true).setHorizontalAlignment("left");
+  // Keep logs/details readable without letting a 40-line cell fill the screen.
+  sheet.setRowHeightsForced(2, rows - 1, 42);
+
+  const notes = {
+    id: "Input: exact Incogniton/AdsPower profile ID. Stored as plain text.",
+    profilename: "Input: exact seller profile name. Buyer checker accounts belong in ListPilot Settings, not the seller queue.",
+    proxy: "Optional input. Leave blank to keep the browser profile's current proxy. Do not share proxy credentials.",
+    status: "Blank or Pending queues this row. Success means the owner task completed; also review Check Result and Visibility.",
+    checkresult: "Owner scan quality. OK means the scan was read; it does not mean every listing is live.",
+    othercount: "Listings needing identity action, sold, expired, draft, removed, or unknown. Total = Live + Pending + Rejected + Other.",
+    visibility: "Buyer sample result, not a global visibility verdict. NOT_IN_SEARCH means the link opened but the sampled search did not find it.",
+    visibilitydetail: "Sample scope and per-listing results. Exact Facebook listing IDs are required for verified search matches. Expand this row to read the full details.",
+    pkcheck: "PK buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location.",
+    uscheck: "US buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location."
+  };
+  const numeric = new Set(["responses", "response", "totallisting", "livecount", "pendingcount", "rejectedcount", "othercount", "total", "live", "pending", "rejected"]);
+  const statusColumns = new Set(["status", "checkresult", "visibility", "pkcheck", "uscheck"]);
+  // Replace only this helper's own rules on repeat runs; preserve user rules.
+  const rules = sheet.getConditionalFormatRules().filter(rule => {
+    const condition = rule.getBooleanCondition();
+    return !condition || !condition.getCriteriaValues().some(v => String(v).indexOf("ListPilotFormat:") !== -1);
+  });
+  const ownRules = [];
+  function rule(range, marker, formula, bg, fg) {
+    ownRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND(N("ListPilotFormat:' + marker + '")=0,' + formula + ')')
+      .setBackground(bg).setFontColor(fg).setRanges([range]).build());
+  }
+  headers.forEach((name, index) => {
+    const normalized = headerKey_(name);
+    const key = normalized === "statu" ? "status" : normalized;
+    const column = index + 1;
+    const range = sheet.getRange(2, column, rows - 1, 1);
+    const letter = sheet.getRange(1, column).getA1Notation().replace(/\d+$/, "");
+    const cell = "$" + letter + "2";
+    if (notes[key] && !sheet.getRange(1, column).getNote()) sheet.getRange(1, column).setNote(notes[key]);
+    if (numeric.has(key)) {
+      range.setNumberFormat("0").setHorizontalAlignment("center");
+      sheet.setColumnWidth(column, 100);
+      rule(range, key + ":positive", "IFERROR(VALUE(" + cell + ")>0,FALSE)",
+        key === "rejectedcount" || key === "rejected" ? "#FDEBEC" :
+        key === "pendingcount" || key === "othercount" || key === "pending" ? "#FFF3D6" : "#E7F5ED",
+        key === "rejectedcount" || key === "rejected" ? "#A32632" : "#175A36");
+    } else if (key === "id") {
+      sheet.setColumnWidth(column, 290);
+    } else if (key === "profilename" || key === "profile") {
+      sheet.setColumnWidth(column, 210);
+    } else if (key.includes("detail") || key === "description") {
+      sheet.setColumnWidth(column, 520);
+    } else if (key === "alllisting" || key === "needsattention" || key === "statussummary") {
+      sheet.setColumnWidth(column, 380);
+    } else if (key === "status" || key === "checkresult") {
+      sheet.setColumnWidth(column, 300);
+    } else if (key === "visibility" || key === "pkcheck" || key === "uscheck") {
+      sheet.setColumnWidth(column, 240);
+    } else if (key === "lastchecked" || key === "visibilitychecked" || key === "time") {
+      sheet.setColumnWidth(column, 185);
+      if (key === "time") range.setNumberFormat("yyyy-mm-dd hh:mm");
+    }
+    if (statusColumns.has(key)) {
+      rule(range, key + ":error", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^failed|logged_out|checkpoint|layout_unknown|no_marketplace|timeout|hidden|error|unavailable")', "#FDEBEC", "#A32632");
+      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)partial|not_in_search|action_required|link only|unverified|waiting|claimed|pending")', "#FFF3D6", "#825500");
+      rule(range, key + ":off", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(off|skipped|not_checked|no_listings|stopped)")', "#EDF0F5", "#596579");
+      rule(range, key + ":ok", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(success|ok)|^[0-9]+/[0-9]+ in search$")', "#E7F5ED", "#175A36");
+    }
+  });
+  rule(body, "band", "MOD(ROW(),2)=0", "#F3F6FC", "#172033");
+  // User rules retain priority. Alternating row colors come after status rules.
+  sheet.setConditionalFormatRules(rules.concat(ownRules));
 }
 
 function doGet(e) {
   const action = e.parameter.action;
+
+  // Read-only health check: no row reads, claims, column creation or writes.
+  if (action === "health") {
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      if (!ss) return jsonOut_({success: false, service: "ListPilot"});
+      ss.getSheets();  // Verify that the deployment can access spreadsheet metadata.
+      return jsonOut_({success: true, service: "ListPilot", spreadsheetReady: true});
+    } catch (err) {
+      return jsonOut_({success: false, service: "ListPilot"});
+    }
+  }
 
   if (action === "getPendingRows") {
     const sheetName = e.parameter.sheetName || SHEET_FB_LISTING;
@@ -328,6 +455,7 @@ function doPost(e) {
           history.appendRow(["Time", "Profile", "Total", "Live", "Pending", "Rejected", "Check Result", "Change"]);
           history.getRange("A1:H1").setFontWeight("bold");
           history.setFrozenRows(1);
+          formatListPilotSheet_(history);
         }
         const toNum = v => (v === null || v === undefined || v === "" ? null : Number(v));
         const now = {live: toNum(payload.live), pending: toNum(payload.pending), rejected: toNum(payload.rejected)};

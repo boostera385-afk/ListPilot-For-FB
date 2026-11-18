@@ -30,6 +30,18 @@ class ClassifyStatusTests(unittest.TestCase):
     def test_active_tab_defaults_to_live(self):
         self.assertEqual(ls.classify_status("Active", ""), ls.LIVE)
 
+    def test_listing_tips_do_not_override_explicit_active_status(self):
+        for tip in ("Tip: Improve the description", "Tip: Renew your listing?"):
+            with self.subTest(tip=tip):
+                self.assertEqual(ls.classify_status("All listings", "Active", tip), ls.LIVE)
+
+    def test_clicks_or_an_optimization_tip_do_not_prove_a_listing_is_live(self):
+        self.assertEqual(ls.classify_status("All listings", "", "Tip: Improve the description"), ls.UNKNOWN)
+
+    def test_renew_action_alone_does_not_prove_expiration(self):
+        self.assertEqual(ls.classify_status("All listings", "Active", "Renew listing"), ls.LIVE)
+        self.assertEqual(ls.classify_status("All listings", "", "Renew listing"), ls.UNKNOWN)
+
 
 class CountingTests(unittest.TestCase):
     def test_counts_and_format(self):

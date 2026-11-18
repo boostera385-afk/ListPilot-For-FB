@@ -1,8 +1,9 @@
 import customtkinter as ctk
 from gui.app import App
-import sys
+from gui.branding import set_windows_app_id
 
 def main():
+    set_windows_app_id()
     # Set default appearance mode
     ctk.set_appearance_mode("System")  
     ctk.set_default_color_theme("blue")

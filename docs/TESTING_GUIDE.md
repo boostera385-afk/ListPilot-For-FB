@@ -32,6 +32,10 @@ After `setupSheets` the sheet has the tabs `FB Listings`, `Dominancy Checker`, `
 ### Connect the Web App URL
 - In **Settings**, replace **Google Apps Script Web App URL** with the **new** sheet's URL and save.
 - The app reads only the sheet behind this URL, so an old URL keeps reading the old sheet.
+- **Home** and the top bar show verified connection status, not just saved settings. Green **Connected**
+  means the browser Local API or the spreadsheet health check responded. Use **Check now** to refresh.
+- If Sheets shows **Update script**, copy the latest script from **Script Builder** and re-deploy it
+  using Part 1's deployment steps. The connection checks never open profiles or change sheet rows.
 
 ### Set the PK and US checker accounts (optional)
 - In **Settings > Live Checker - Checker Profiles** choose one Pakistani profile and one US profile with a confirmed location.
@@ -77,6 +81,12 @@ The log should show: `Connecting to browser`, `Opening Marketplace 'Your listing
 | **Live History** tab | New row, `Change` = `First check` |
 
 Compare two or three numbers with Facebook by hand: Active, Needs attention, and one listing's clicks.
+
+`Other Count` includes sold, expired, draft, unknown, and `ACTION_REQUIRED` listings.
+An identity-confirmation notice is `ACTION_REQUIRED`, not proof that Facebook rejected the listing.
+Tips such as "Improve the description" or "Renew your listing?" do not override an explicit Active status.
+Two listings with the same title can be separate records; compare their prices and listing IDs as well.
+Failed scans leave counts blank rather than reusing an older run's numbers.
 
 ### Test 2: failure handling
 | `Check Result` | Meaning | What to do |

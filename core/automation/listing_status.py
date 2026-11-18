@@ -13,6 +13,7 @@ REMOVED = "REMOVED"
 EXPIRED = "EXPIRED"
 SOLD = "SOLD"
 DRAFT = "DRAFT"
+ACTION_REQUIRED = "ACTION_REQUIRED"
 UNKNOWN = "UNKNOWN"
 
 # --- Check results (one per profile scan) ------------------------------------
@@ -30,16 +31,18 @@ TIMEOUT = "TIMEOUT"
 RETRYABLE_CODES = (TIMEOUT, LAYOUT_UNKNOWN)
 
 # Order used when listing counts in summaries.
-STATUS_ORDER = (LIVE, PENDING, REJECTED, REMOVED, EXPIRED, SOLD, DRAFT, UNKNOWN)
+STATUS_ORDER = (LIVE, PENDING, REJECTED, ACTION_REQUIRED, REMOVED, EXPIRED, SOLD, DRAFT, UNKNOWN)
 
 # Each rule is checked against "<tab label> <row status> <reason>", first hit wins.
 # Rejection and review wording is checked before "active" so a row such as
 # "Active - Pending review" is not counted as live.
 _RULES = (
-    (REJECTED, r"reject|against our|goes against|breaking our|needs? attention|violat|declined|not approved"),
+    (REJECTED, r"reject|against our|goes against|breaking our|violat|declined|not approved"),
+    (ACTION_REQUIRED, r"confirm your identity|verify your identity|identity verification|identity confirmation"),
+    (REJECTED, r"needs? attention"),
     (PENDING, r"in review|being reviewed|pending|processing|under review|awaiting"),
     (REMOVED, r"removed|deleted|taken down|unavailable"),
-    (EXPIRED, r"expired|renew"),
+    (EXPIRED, r"\bexpired\b"),
     (SOLD, r"\bsold\b"),
     (DRAFT, r"draft|unfinished|incomplete"),
     (LIVE, r"\bactive\b|\blive\b|\bavailable\b|listed on marketplace"),
@@ -59,7 +62,9 @@ def classify_status(tab_label="", row_status="", reason=""):
                 return status
         return UNKNOWN
 
-    row_state = match(f"{row_status} {reason}")
+    # Optimization tips and renewal actions are not publication statuses.
+    status_reason = "" if re.match(r"^\s*tip\s*:", str(reason or ""), re.IGNORECASE) else reason
+    row_state = match(f"{row_status} {status_reason}")
     tab_state = match(tab_label)
     # An "Active" row inside the Needs attention / Sold / Drafts tab is not live:
     # the tab says more than a generic row status.
@@ -131,6 +136,8 @@ def format_listing_details(listings, limit=40, max_chars=45000):
     lines = []
     for item in (listings or [])[:limit]:
         parts = [item.get("state") or UNKNOWN, _clean(item.get("title")) or "Untitled"]
+        if _clean(item.get("price")):
+            parts.append(f"Price {_clean(item['price'])}")
         clicks = item.get("clicksCount")
         messages = item.get("messagesCount")
         if clicks is not None:

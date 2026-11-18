@@ -1,11 +1,12 @@
 import customtkinter as ctk
 import threading
+import time
 from core.engine.grouped_automation_engine import GroupedAutomationEngine
 from core.services.sheets_service import fetch_pending_rows, reset_rows_for_recheck
 from core.automation.browser_manager import is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label
 from core.automation.live_checker import run_live_checker_flow, LIVE_CHECKER_SHEET
-from core.automation.listing_status import format_counts
-from core.automation.visibility_checker import configured_checkers, run_visibility_checks
+from core.automation.listing_status import format_counts, other_count
+from core.automation.visibility_checker import configured_checkers, run_visibility_checks, buyer_options, validate_checker_roles
 from core.automation import listing_visibility as lv
 from core.engine.automation_control import AutomationControl
 from core.engine.exceptions import AutomationStopped
@@ -33,8 +34,8 @@ MODE_HELP = {
     "all": "Clears every finished row and checks all profiles again.",
 }
 
-RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Total", "PK", "US", "Visibility")
-RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 3, 3, 3)
+RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Other", "Total", "PK", "US", "Visibility")
+RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 3, 3, 3)
 
 
 def _parse_concurrency(value, default=3):
@@ -58,7 +59,7 @@ class LiveCheckerView(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
 
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(4, weight=1, minsize=170)
         self.grid_columnconfigure(0, weight=1)
 
         self.engine = None
@@ -69,12 +70,18 @@ class LiveCheckerView(ctk.CTkFrame):
         self.done_count = 0
         self.totals = {}
         self.visibility_issues = 0
+        self.run_options = buyer_options()
+        self._started_at = 0
+        self._phase = "Ready"
+        self._detail = ""
+        self._elapsed_after = None
 
         self._build_header()
         self._build_controls()
         self._build_stats()
         self._build_progress()
         self._build_tabs()
+        self._set_steps_visible(False)
 
         self.status_pulse = anim.Pulse(self.status_chip, "text_color", theme.ACCENT_SOFT, theme.GREEN)
         self._refresh_checkers()
@@ -87,12 +94,14 @@ class LiveCheckerView(ctk.CTkFrame):
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(header, text="Live Checker", font=theme.font(26, "bold"), text_color=theme.TEXT,
                      anchor="w").grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
+        self.header_desc = ctk.CTkLabel(
             header, anchor="w", justify="left", font=theme.font(13), text_color=theme.TEXT_MUTED,
-            text=f"Step 1 reads every profile's listings. Step 2 lets the PK and US checker accounts search "
-                 f"for each LIVE listing as buyers. Results go to the '{LIVE_CHECKER_SHEET}' sheet.",
+            text="Scan seller listings, then optionally spot-check buyer visibility. Buyer switches and sample size are in Settings.",
             wraplength=900,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        )
+        self.header_desc.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        header.bind("<Configure>", lambda event: self.header_desc.configure(
+            wraplength=max(300, self._reverse_widget_scaling(event.width) - 8)))
 
         chips = ctk.CTkFrame(header, fg_color="transparent")
         chips.grid(row=0, column=1, sticky="e")
@@ -105,21 +114,22 @@ class LiveCheckerView(ctk.CTkFrame):
 
     def _build_controls(self):
         card = Card(self)
+        self.controls_card = card
         card.grid(row=1, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.GAP))
         card.grid_columnconfigure(4, weight=1)
 
         self.start_btn = ctk.CTkButton(card, text="▶  Start Live Check", command=self.start_automation,
-                                       width=190, height=40, corner_radius=theme.RADIUS_SM,
+                                       width=170, height=40, corner_radius=theme.RADIUS_SM,
                                        fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                                        font=theme.font(14, "bold"))
         self.start_btn.grid(row=0, column=0, rowspan=2, padx=(16, 8), pady=16)
 
-        self.stop_btn = ctk.CTkButton(card, text="■  Stop", command=self.stop_automation, width=96, height=40,
+        self.stop_btn = ctk.CTkButton(card, text="Pause", command=self.stop_automation, width=86, height=40,
                                       corner_radius=theme.RADIUS_SM, fg_color=theme.DANGER,
                                       hover_color=theme.DANGER_HOVER, font=theme.font(13, "bold"), state="disabled")
         self.stop_btn.grid(row=0, column=1, rowspan=2, padx=(0, 8))
 
-        self.continue_btn = ctk.CTkButton(card, text="⏵  Continue", command=self.continue_automation, width=110,
+        self.continue_btn = ctk.CTkButton(card, text="Continue", command=self.continue_automation, width=100,
                                           height=40, corner_radius=theme.RADIUS_SM, fg_color=theme.NEUTRAL_BTN,
                                           hover_color=theme.NEUTRAL_BTN_HOVER, text_color=theme.TEXT,
                                           font=theme.font(13, "bold"), state="disabled")
@@ -132,46 +142,80 @@ class LiveCheckerView(ctk.CTkFrame):
         self.concurrency_var = self.concurrency.var  # kept for older callers
 
         mode_box = ctk.CTkFrame(card, fg_color="transparent")
+        self.mode_box = mode_box
         mode_box.grid(row=0, column=5, rowspan=2, sticky="e", padx=16)
         ctk.CTkLabel(mode_box, text="What to check", font=theme.font(12), text_color=theme.TEXT_MUTED,
                      anchor="w").grid(row=0, column=0, sticky="w")
         self.mode_var = ctk.StringVar(value=MODE_LABELS["new"])
         self.mode_menu = ctk.CTkOptionMenu(
-            mode_box, variable=self.mode_var, values=list(MODE_LABELS.values()), width=290, height=32,
+            mode_box, variable=self.mode_var, values=list(MODE_LABELS.values()), width=275, height=32,
             fg_color=theme.SURFACE_ALT, button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
             text_color=theme.TEXT, font=theme.font(12), command=self._on_mode_change,
         )
         self.mode_menu.grid(row=1, column=0, sticky="w", pady=(2, 2))
         self.mode_help = ctk.CTkLabel(mode_box, text=MODE_HELP["new"], font=theme.font(11),
-                                      text_color=theme.TEXT_MUTED, anchor="w")
+                                      text_color=theme.TEXT_MUTED, anchor="w", wraplength=275, justify="left")
         self.mode_help.grid(row=2, column=0, sticky="w")
+        self.run_info = ctk.CTkLabel(card, text="Ready · Quick buyer sample: up to 3 listings per seller",
+                                     font=theme.font(11), text_color=theme.TEXT_MUTED, anchor="w",
+                                     justify="left", wraplength=900)
+        self.run_info.grid(row=3, column=0, columnspan=6, sticky="ew", padx=16, pady=(0, 8))
+        card.bind("<Configure>", self._layout_controls)
+
+    def _layout_controls(self, event):
+        width = self._reverse_widget_scaling(event.width)
+        if width < 940:
+            self.mode_box.grid_configure(row=2, column=0, columnspan=6, sticky="w", padx=16, pady=(0, 8))
+        else:
+            self.mode_box.grid_configure(row=0, column=5, columnspan=1, sticky="e", padx=16, pady=0)
+        self.run_info.configure(wraplength=max(300, width - 32))
 
     def _build_stats(self):
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.grid(row=2, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.GAP))
         specs = (
-            ("profiles", "Profiles checked", theme.ACCENT),
-            ("total", "Total listings", theme.BLUE),
+            ("profiles", "Profiles", theme.ACCENT),
+            ("total", "Listings", theme.BLUE),
             ("LIVE", "Live", theme.GREEN),
             ("PENDING", "Pending", theme.AMBER),
             ("REJECTED", "Rejected", theme.RED),
-            ("hidden", "Visibility issues", theme.PURPLE),
+            ("hidden", "Buyer notes", theme.PURPLE),
         )
         self.stats = {}
         for index, (key, title, color) in enumerate(specs):
             row.grid_columnconfigure(index, weight=1, uniform="stats")
-            card = StatCard(row, title, color)
+            card = StatCard(row, title, color, compact=True)
             card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
             self.stats[key] = card
+        self.other_summary = ctk.CTkLabel(
+            row, text="Other: 0 (needs action: 0, unknown: 0)", font=theme.font(11),
+            text_color=theme.TEXT_MUTED, anchor="w",
+        )
+        self.other_summary.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.steps_toggle = ctk.CTkButton(
+            row, text="Show stages", width=105, height=24, command=self._toggle_steps,
+            fg_color=theme.NEUTRAL_BTN, hover_color=theme.NEUTRAL_BTN_HOVER,
+            text_color=theme.TEXT, font=theme.font(11),
+        )
+        self.steps_toggle.grid(row=1, column=4, columnspan=2, sticky="e", pady=(4, 0))
 
     def _build_progress(self):
         card = Card(self)
+        self.progress_card = card
         card.grid(row=3, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.GAP))
         card.grid_columnconfigure((0, 1), weight=1, uniform="steps")
-        self.step1 = StepProgress(card, 1, "Owner profile scan", theme.ACCENT)
+        self.step1 = StepProgress(card, 1, "Owner scan", theme.ACCENT)
         self.step1.grid(row=0, column=0, sticky="ew", padx=(16, 12), pady=14)
-        self.step2 = StepProgress(card, 2, "Buyer visibility (PK + US)", theme.PURPLE)
+        self.step2 = StepProgress(card, 2, "Buyer sample", theme.PURPLE)
         self.step2.grid(row=0, column=1, sticky="ew", padx=(12, 16), pady=14)
+
+    def _set_steps_visible(self, visible):
+        self._steps_visible = visible
+        self.progress_card.grid() if visible else self.progress_card.grid_remove()
+        self.steps_toggle.configure(text="Hide stages" if visible else "Show stages")
+
+    def _toggle_steps(self):
+        self._set_steps_visible(not self._steps_visible)
 
     def _build_tabs(self):
         self.tabs = ctk.CTkTabview(self, fg_color=theme.SURFACE, corner_radius=theme.RADIUS,
@@ -183,7 +227,14 @@ class LiveCheckerView(ctk.CTkFrame):
             tab = self.tabs.add(name)
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
-        self.table = ResultsTable(self.tabs.tab("Results"), RESULT_COLUMNS, RESULT_WEIGHTS)
+        self.table = ResultsTable(
+            self.tabs.tab("Results"), RESULT_COLUMNS, RESULT_WEIGHTS, min_width=940,
+            wraplengths=(120, 85, 35, 45, 50, 40, 40, 80, 80, 85),
+            display_formatters={"Visibility": lv.visibility_label, "Result": lambda code: {
+                "OK": "Scanned", "PARTIAL": "Partial scan", "CHECKPOINT": "Account check",
+                "LAYOUT_UNKNOWN": "Layout unread", "LOGGED_OUT": "Login needed",
+            }.get(str(code), str(code))},
+        )
         self.table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.log = ColoredLog(self.tabs.tab("Log"))
         self.log.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
@@ -195,10 +246,13 @@ class LiveCheckerView(ctk.CTkFrame):
         self.mode_help.configure(text=MODE_HELP[key])
 
     def _refresh_checkers(self):
-        configured = dict(configured_checkers())
+        options = self.run_options if self.is_processing else buyer_options()
+        configured = dict(configured_checkers(options))
         for label, chip in (("PK", self.pk_chip), ("US", self.us_chip)):
             if label in configured:
-                chip.set(f"{label}: {configured[label]}"[:28], theme.GREEN)
+                chip.set(f"{label}: Enabled", theme.GREEN)
+            elif not options.enabled or not (options.pk_enabled if label == "PK" else options.us_enabled):
+                chip.set(f"{label}: Off", theme.GRAY)
             else:
                 chip.set(f"{label}: not set", theme.AMBER)
         self.after(3000, self._refresh_checkers)
@@ -219,8 +273,25 @@ class LiveCheckerView(ctk.CTkFrame):
         self.totals, self.done_count, self.visibility_issues = {}, 0, 0
         for card in self.stats.values():
             card.set(0)
+        self.other_summary.configure(text="Other: 0 (needs action: 0, unknown: 0)", text_color=theme.TEXT_MUTED)
         self.step1.reset()
-        self.step2.reset("Waiting" if configured_checkers() else "Skipped – set checkers in Settings")
+        self.step2.reset("Waiting" if self.run_options.checkers else "Off")
+        self._set_steps_visible(self._reverse_widget_scaling(self.winfo_height()) >= 650)
+
+    def _tick_elapsed(self):
+        elapsed = max(0, int(time.monotonic() - self._started_at)) if self._started_at else 0
+        self.run_info.configure(text=f"{self._phase} · {elapsed // 60:02d}:{elapsed % 60:02d}" +
+                                (f" · {self._detail}" if self._detail else ""))
+        if self.is_processing:
+            self._elapsed_after = self.after(1000, self._tick_elapsed)
+
+    def _buyer_detail(self, label, number, total, title, state):
+        self._detail = f"{label} {number}/{total}: {title[:45]} — {state.replace('_', ' ').lower()}"
+        self._tick_elapsed_once()
+
+    def _tick_elapsed_once(self):
+        elapsed = max(0, int(time.monotonic() - self._started_at)) if self._started_at else 0
+        self.run_info.configure(text=f"{self._phase} · {elapsed // 60:02d}:{elapsed % 60:02d} · {self._detail}")
 
     def append_log(self, text):
         log_event(text)
@@ -231,12 +302,14 @@ class LiveCheckerView(ctk.CTkFrame):
             engine_running = bool(self.engine and self.engine.is_running)
             paused = bool(engine_running and self.engine.is_paused)
             if self.visibility_control:
+                self.stop_btn.configure(text="Stop buyers")
                 self.start_btn.configure(text="Checking visibility...")
                 self._set_buttons(False, True, False)
                 self.concurrency.set_enabled(False)
                 self.mode_menu.configure(state="disabled")
                 self._set_status("Checking visibility", theme.PURPLE, True)
             elif self.is_processing or engine_running:
+                self.stop_btn.configure(text="Pause")
                 label = "Paused" if paused else "Running"
                 self.start_btn.configure(text=f"{label}  {self.success_count}/{self.total_count}")
                 self._set_buttons(False, engine_running and not paused, paused)
@@ -251,7 +324,12 @@ class LiveCheckerView(ctk.CTkFrame):
                 self.start_btn.configure(text="▶  Start Live Check")
                 self._set_buttons(True, False, False)
                 self.concurrency.set_enabled(True)
-                self._set_status("Idle", theme.GRAY, False)
+                self._set_status("Finished" if self.done_count else "Idle",
+                                 theme.AMBER if self.visibility_issues else theme.GREEN if self.done_count else theme.GRAY, False)
+                if self.done_count:
+                    self._phase = "Finished"
+                    self._set_steps_visible(False)
+                    self._tick_elapsed_once()
 
         run_on_ui(_update)
 
@@ -279,22 +357,29 @@ class LiveCheckerView(ctk.CTkFrame):
         for state, count in counts.items():
             self.totals[state] = self.totals.get(state, 0) + count
         code = post.get("_live_check") or ("OK" if success else "FAILED")
+        verified = "_live_counts" in post or code == "NO_LISTINGS"
         self.table.upsert(post.get("rowNumber") or _profile_name(post), {
             "Profile": _profile_name(post),
             "Result": code.split(":")[0],
-            "Live": counts.get("LIVE", 0),
-            "Pending": counts.get("PENDING", 0),
-            "Rejected": counts.get("REJECTED", 0),
-            "Total": sum(counts.values()),
-            "PK": "…" if counts.get("LIVE") and configured_checkers() else "—",
-            "US": "…" if counts.get("LIVE") and configured_checkers() else "—",
-            "Visibility": "—",
+            "Live": counts.get("LIVE", 0) if verified else "—",
+            "Pending": counts.get("PENDING", 0) if verified else "—",
+            "Rejected": counts.get("REJECTED", 0) if verified else "—",
+            "Other": other_count(counts) if verified else "—",
+            "Total": sum(counts.values()) if verified else "—",
+            "PK": "Waiting" if counts.get("LIVE") and "PK" in dict(self.run_options.checkers) else "Off",
+            "US": "Waiting" if counts.get("LIVE") and "US" in dict(self.run_options.checkers) else "Off",
+            "Visibility": "PENDING" if counts.get("LIVE") and self.run_options.checkers else "SKIPPED",
         }, colors={"Result": theme.status_color(code), "Live": theme.GREEN,
-                   "Pending": theme.AMBER, "Rejected": theme.RED})
+                   "Pending": theme.AMBER, "Rejected": theme.RED, "Other": theme.AMBER})
         self.stats["profiles"].set(self.done_count)
         self.stats["total"].set(sum(self.totals.values()))
         for state in ("LIVE", "PENDING", "REJECTED"):
             self.stats[state].set(self.totals.get(state, 0))
+        action, unknown = self.totals.get("ACTION_REQUIRED", 0), self.totals.get("UNKNOWN", 0)
+        self.other_summary.configure(
+            text=f"Other: {other_count(self.totals)} (needs action: {action}, unknown: {unknown})",
+            text_color=theme.AMBER if action or unknown else theme.TEXT_MUTED,
+        )
         self.step1.update_progress(self.done_count, self.total_count, " profiles")
         if self.done_count >= self.total_count:
             self.step1.finish(f"{self.done_count} / {self.total_count} profiles")
@@ -310,7 +395,7 @@ class LiveCheckerView(ctk.CTkFrame):
             pk = values.get(lv.checker_column("PK"), "—")
             us = values.get(lv.checker_column("US"), "—")
             self.table.upsert(post.get("rowNumber") or _profile_name(post), {
-                "PK": pk.split(",")[0], "US": us.split(",")[0], "Visibility": code.split(":")[0],
+                "PK": pk, "US": us, "Visibility": code,
             }, colors={"Visibility": theme.status_color(code)})
         self.stats["hidden"].set(self.visibility_issues)
 
@@ -319,6 +404,7 @@ class LiveCheckerView(ctk.CTkFrame):
         if self.is_processing or (self.engine and self.engine.is_running):
             return
 
+        self.run_options = buyer_options()
         self._reset_dashboard()
 
         concurrency, concurrency_warning = _parse_concurrency(self.concurrency.get())
@@ -326,6 +412,12 @@ class LiveCheckerView(ctk.CTkFrame):
         mode = next((key for key, label in MODE_LABELS.items() if label == self.mode_var.get()), "new")
 
         self.is_processing = True
+        if self._elapsed_after:
+            self.after_cancel(self._elapsed_after)
+            self._elapsed_after = None
+        self._started_at = time.monotonic()
+        self._phase, self._detail = "Preparing", ""
+        self._tick_elapsed()
         self.start_btn.configure(text="Preparing...")
         self._set_buttons(False, False, False)
         self._set_status("Preparing", theme.ACCENT, True)
@@ -388,8 +480,22 @@ class LiveCheckerView(ctk.CTkFrame):
             toast("Nothing to check – no pending rows.", theme.AMBER)
             self._finish_idle()
             return
+        try:
+            conflict = validate_checker_roles(posts, self.run_options)
+        except Exception:
+            conflict = "Could not validate buyer/seller profile IDs. Check Settings and try again."
+        if conflict:
+            logger_proxy(f"ERROR: {conflict}")
+            toast(conflict, theme.RED)
+            self._finish_idle()
+            return
+        for post in posts:
+            post["_buyer_options"] = self.run_options
 
         concurrency = min(concurrency, len(posts))
+        self._phase = "Owner scan"
+        logger_proxy(f"Buyer plan: {', '.join(label for label, _ in self.run_options.checkers) or 'Off'}; "
+                     f"up to {self.run_options.limit} live listings per seller. Owner counts still include every listing.")
         logger_proxy(f"Found {len(posts)} profiles to check. Using concurrency: {concurrency}")
 
         self.success_count = 0
@@ -429,7 +535,11 @@ class LiveCheckerView(ctk.CTkFrame):
                 run_on_ui(self.append_log, f"Listings found: {format_counts(totals)}")
                 if issues:
                     run_on_ui(self.append_log, "Profiles with issues: " + ", ".join(f"{n} {c}" for c, n in sorted(issues.items())))
-            run_on_ui(self.step1.finish, f"{self.success_count} / {self.total_count} succeeded")
+            attention = sum(issues.values())
+            run_on_ui(self.step1.finish,
+                      f"{self.total_count} / {self.total_count} processed" +
+                      (f" · {attention} need attention" if attention else ""),
+                      theme.AMBER if attention else theme.GREEN)
             self._run_visibility_pass(posts, logger_proxy, master_ui_context)
             self.is_processing = False
             run_on_ui(self.update_start_button)
@@ -439,9 +549,11 @@ class LiveCheckerView(ctk.CTkFrame):
 
     def _run_visibility_pass(self, posts, logger_proxy, master_ui_context):
         """Second phase: the PK and US checker accounts look for each LIVE listing."""
-        if not configured_checkers():
-            logger_proxy("Visibility check skipped: set the PK / US checker profiles in Settings to enable it.")
+        if not self.run_options.checkers:
+            logger_proxy("Buyer checks are off or no enabled checker is configured. Owner scan complete.")
+            run_on_ui(self.step2.reset, "Off")
             return
+        self._phase = "Buyer sample"
         self.visibility_control = AutomationControl()
         run_on_ui(self.update_start_button)
 
@@ -450,10 +562,13 @@ class LiveCheckerView(ctk.CTkFrame):
 
         try:
             summary = run_visibility_checks(posts, logger_proxy, self.visibility_control, master_ui_context,
-                                            progress=progress)
+                                             progress=progress, options=self.run_options,
+                                             detail=lambda *args: run_on_ui(self._buyer_detail, *args))
             if summary:
                 logger_proxy("Visibility: " + ", ".join(f"{n} {c}" for c, n in sorted(summary.items())))
-                run_on_ui(self.step2.finish, ", ".join(f"{n} {c}" for c, n in sorted(summary.items())))
+                notes = any(code != "OK" for code in summary)
+                run_on_ui(self.step2.finish, "Sample complete" + (" · see results" if notes else ""),
+                          theme.AMBER if notes else theme.GREEN)
             else:
                 logger_proxy("Visibility check: no LIVE listings to verify.")
                 run_on_ui(self.step2.finish, "No LIVE listings")

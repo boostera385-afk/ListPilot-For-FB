@@ -296,6 +296,17 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         self.assertEqual(post["_live_check"], ls.LOGGED_OUT)
         self.assertEqual(len(history), 1)
 
+    def test_failed_scan_clears_stale_counts_instead_of_reporting_old_results(self):
+        post = {"rowNumber": 5, "profileName": "virtual-logged-out",
+                "_live_counts": {ls.LIVE: 12}, "_live_listings": [{"state": ls.LIVE}]}
+        outcome, error, sheet, history, logs, post = self.run_flow("logged_out", post)
+        self.assertIsInstance(error, PermanentError)
+        for column in ("Total Listings", "Live Count", "Pending Count", "Rejected Count",
+                       "Other Count", "Listing Details", "All Listings", "Needs Attention"):
+            self.assertEqual(sheet[column], "")
+        self.assertNotIn("_live_counts", post)
+        self.assertNotIn("_live_listings", post)
+
 
 if __name__ == "__main__":
     unittest.main()

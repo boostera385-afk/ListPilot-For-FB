@@ -32,6 +32,14 @@ def provider_label():
     return "AdsPower" if get_provider() == ADSPOWER else "Incogniton"
 
 
+def is_api_ready(provider=None):
+    """One lightweight health check; never launch a browser or retry in a loop."""
+    provider = provider or get_provider()
+    if provider == ADSPOWER:
+        return _adspower.is_adspower_api_ready(timeout=2, retry=False)
+    return _incogniton.is_incogniton_api_ready()
+
+
 def _mgr():
     """Returns the manager module for the active provider."""
     return _adspower if get_provider() == ADSPOWER else _incogniton

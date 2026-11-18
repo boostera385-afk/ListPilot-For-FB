@@ -10,14 +10,14 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-from core.config import get_setting
+from core.config import load_config
 from core.engine.exceptions import AutomationStopped
 from core.automation import listing_visibility as lv
-from core.automation.browser_manager import start_profile, stop_profile
+from core.automation.browser_manager import start_profile, stop_profile, resolve_profile_id
 from core.automation.live_checker import LIVE_CHECKER_SHEET, capture_diagnostics
 from core.services.sheets_service import update_column_values
 
-SEARCH_SCROLLS = 3
+SEARCH_SCROLLS = 2
 
 _SEARCH_RESULTS_JS = r"""
 () => Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]')).map(a => ({
@@ -36,14 +36,32 @@ _CHECKPOINT_TEXTS = (
 )
 
 
-def configured_checkers():
+def buyer_options():
+    return lv.BuyerOptions.from_settings(load_config())
+
+
+def configured_checkers(options=None):
     """[(label, profile name or ID)] for the checkers filled in Settings."""
-    found = []
-    for label, key in lv.CHECKERS:
-        profile = str(get_setting(key, "") or "").strip()
-        if profile:
-            found.append((label, profile))
-    return found
+    return list((options or buyer_options()).checkers)
+
+
+def validate_checker_roles(posts, options):
+    """Reject self-checks/duplicate buyer accounts before any profile is launched."""
+    resolved = {}
+    for label, profile in options.checkers:
+        canonical = resolve_profile_id(profile)
+        if not canonical:
+            return f"{label} checker cannot be resolved. Use its exact profile ID in Settings."
+        if canonical in resolved:
+            return "PK and US must be different Facebook profiles."
+        resolved[canonical] = label
+    if not resolved:
+        return ""
+    for post in posts:
+        identifier = post.get("id") or post.get("ID") or post.get("profileName") or post.get("Profile Name") or post.get("profile name")
+        if identifier and resolve_profile_id(str(identifier)) in resolved:
+            return f"Row {post.get('rowNumber', '?')} is also a buyer checker. Keep checker accounts out of the seller queue, or turn buyer checks off."
+    return ""
 
 
 def _debug_url(data):
@@ -79,42 +97,77 @@ def _blocked_reason(page):
 
 def _goto(page, url, sleep):
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.goto(url, wait_until="domcontentloaded", timeout=20000)
     except Exception:
-        pass
-    sleep(random.uniform(2.5, 4.5))
+        return False
+    sleep(0.2)  # cooperative stop checkpoint, not a multi-second fixed delay
+    return True
 
 
-def _search(page, target, sleep):
-    _goto(page, lv.search_url(target["title"]), sleep)
+def _search(page, target, sleep, cache=None):
+    key = lv.search_url(target["title"])
+    if cache is not None and key in cache:
+        cached, complete = cache[key]
+        if lv.found_in_search(cached, target):
+            return True
+        if complete:
+            return False
+    if not _goto(page, key, sleep):
+        return None
+    try:
+        page.wait_for_function(r"""() =>
+            document.querySelector('a[href*="/marketplace/item/"], input[name="email"]') ||
+            /no results|no listings found|couldn't find/i.test(document.body.innerText)
+        """, timeout=5000)
+    except Exception:
+        return None  # never turn an unloaded page into a confident search miss
+    collected = []
     for scroll in range(SEARCH_SCROLLS + 1):
         try:
             results = page.evaluate(_SEARCH_RESULTS_JS) or []
         except Exception:
-            results = []
+            return None
+        collected.extend(results)
         if lv.found_in_search(results, target):
+            if cache is not None:
+                cache[key] = (collected, False)
             return True
         if scroll < SEARCH_SCROLLS:
             try:
                 page.mouse.wheel(0, random.randint(1400, 2200))
             except Exception:
                 break
-            sleep(random.uniform(1.5, 2.5))
+            sleep(random.uniform(0.6, 1.0))
+    if cache is not None:
+        cache[key] = (collected, True)
     return False
 
 
 def _open_link(page, target, sleep):
-    _goto(page, lv.item_url(target["listingId"]), sleep)
+    if not _goto(page, lv.item_url(target["listingId"]), sleep):
+        return lv.UNCLEAR
     try:
+        page.wait_for_function(r"""(title) => {
+            const text = document.body ? document.body.innerText.toLowerCase() : '';
+            return text.includes(title.toLowerCase()) ||
+                /listing isn't available|content isn't available|listing not found|log in|confirm your identity/.test(text);
+        }""", arg=target["title"], timeout=5000)
         text = page.evaluate("() => document.body ? document.body.innerText.slice(0, 20000) : ''") or ""
     except Exception:
         text = ""
     return lv.classify_item_page(page.url, text, target["title"])
 
 
-def check_listings(debug_url, label, targets, log, sleep, on_result=None):
+def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_detail=None):
     """One result per target, in order, from one checker browser."""
     results = []
+    search_cache, result_cache = {}, {}
+    if not any(target.get("listingId") for target in targets):
+        for _ in targets:
+            if on_result:
+                on_result()
+        log(f"[{label} checker] No listing IDs; this sample is unverified. No browser search performed.")
+        return [lv.UNCLEAR] * len(targets)
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(debug_url, timeout=30000)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
@@ -128,19 +181,30 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None):
                 return [lv.ERROR] * len(targets)
 
             for number, target in enumerate(targets, 1):
+                if on_detail:
+                    on_detail(label, number, len(targets), target["title"], "Checking")
                 try:
-                    if _search(page, target, sleep):
-                        state = lv.SEARCH
-                    elif target["listingId"]:
-                        state = _open_link(page, target, sleep)
+                    listing_id = target.get("listingId")
+                    if not listing_id:
+                        state = lv.UNCLEAR
+                        log(f"[{label} checker] No listing ID for '{target['title']}'; title-only matches are not verified.")
+                    elif listing_id in result_cache:
+                        state = result_cache[listing_id]
                     else:
-                        state = lv.UNCLEAR  # older layout: no ID, so no link to open
+                        found = _search(page, target, sleep, search_cache)
+                        state = lv.SEARCH if found else _open_link(page, target, sleep)
+                        if found is None and state == lv.LINK_ONLY:
+                            state = lv.UNCLEAR
+                            log(f"[{label} checker] Link opens, but the search page did not finish loading; search visibility is unverified.")
+                    if listing_id and state not in (lv.ERROR, lv.UNCLEAR):
+                        result_cache[listing_id] = state
                     if _blocked_reason(page):
                         log(f"[{label} checker] account blocked mid-run; stopping this checker.")
                         results.extend([lv.ERROR] * (len(targets) - len(results)))
                         break
                 except AutomationStopped:
-                    raise
+                    results.extend([lv.UNCLEAR] * (len(targets) - len(results)))
+                    return results
                 except Exception as exc:
                     log(f"[{label} checker] '{target['title']}': {exc}")
                     state = lv.ERROR
@@ -148,7 +212,9 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None):
                 log(f"[{label} checker] {number}/{len(targets)} {target['title']}: {state}")
                 if on_result:
                     on_result()
-                sleep(random.uniform(2.0, 4.0))
+                if on_detail:
+                    on_detail(label, number, len(targets), target["title"], state)
+                sleep(0.2)
         finally:
             try:
                 page.close()
@@ -157,7 +223,7 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None):
     return results
 
 
-def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
+def run_visibility_checks(posts, log, stop_event, master=None, progress=None, options=None, detail=None):
     """Check every LIVE listing of ``posts`` from each configured checker.
 
     Writes PK Check / US Check / Visibility / Visibility Details per row and
@@ -168,10 +234,12 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
         if stop_event.wait(seconds):
             raise AutomationStopped("User manually stopped automation.")
 
-    checkers = configured_checkers()
+    options = options or buyer_options()
+    started_at = time.monotonic()
+    checkers = configured_checkers(options)
     rows = []
     for post in posts:
-        targets, skipped = lv.visibility_targets(post.get("_live_listings"))
+        targets, skipped = lv.visibility_targets(post.get("_live_listings"), limit=options.limit)
         if targets and post.get("rowNumber"):
             rows.append((post, targets, skipped))
     if not checkers or not rows:
@@ -194,7 +262,12 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
     for label, profile in checkers:
         label_start = done[0]
         if stop_event.is_set():
-            raise AutomationStopped("User manually stopped automation.")
+            break
+        if not any(target.get("listingId") for target in flat):
+            log(f"[{label} checker] No exact listing IDs in the sample; skipped browser launch.")
+            per_label[label] = [lv.UNCLEAR] * len(flat)
+            advance(len(flat))
+            continue
         log(f"[{label} checker] Starting profile '{profile}'...")
         from gui.ui_helpers import resolve_duplicates_ui
         started, data = start_profile(profile, duplicate_resolver=resolve_duplicates_ui, master=master, logger_callback=log)
@@ -207,9 +280,10 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
                 stop_profile(profile)
             continue
         try:
-            per_label[label] = check_listings(url, label, flat, log, sleep, on_result=advance)
+            per_label[label] = check_listings(url, label, flat, log, sleep, on_result=advance, on_detail=detail)
         except AutomationStopped:
-            raise
+            per_label[label] = [lv.UNCLEAR] * len(flat)
+            break
         except Exception as exc:
             log(f"[{label} checker] failed: {exc}")
             per_label[label] = [lv.ERROR] * len(flat)
@@ -217,14 +291,18 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
             advance(label_start + len(flat) - done[0])  # count listings skipped by an early stop
             if not stop_profile(profile):
                 log(f"[{label} checker] Warning: the browser provider did not confirm the profile stopped.")
-            stop_event.wait(3)
+            stop_event.wait(0.2)
 
     summary = {}
     offset = 0
     for post, targets, skipped in rows:
-        own = {label: results[offset:offset + len(targets)] for label, results in per_label.items()}
+        own = {label: per_label.get(label, [lv.UNCLEAR] * len(flat))[offset:offset + len(targets)]
+               for label, _ in checkers}
         offset += len(targets)
-        values = lv.row_columns(targets, own, skipped)
+        values = lv.row_columns(targets, own, skipped, disabled={"PK", "US"} - set(own))
+        if stop_event.is_set():
+            values["Visibility"] = "STOPPED"
+            values["Visibility Details"] = "Stopped by user. Partial/unverified results follow.\n" + values["Visibility Details"]
         post["_visibility"] = values["Visibility"]
         post["_visibility_cols"] = values
         code = values["Visibility"].split(":")[0]
@@ -235,4 +313,7 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None):
                 log(f"Note: row {post['rowNumber']}: could not save visibility columns ({message}).")
         except Exception as exc:
             log(f"Note: row {post['rowNumber']}: could not save visibility columns: {exc}")
+    log(f"Buyer sample finished in {int(time.monotonic() - started_at)}s; {len(flat)} target(s) per enabled buyer.")
+    if stop_event.is_set():
+        raise AutomationStopped("Buyer checks stopped; partial results saved.")
     return summary

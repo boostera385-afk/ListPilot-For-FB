@@ -118,10 +118,10 @@ def is_adspower_running():
     return False
 
 
-def is_adspower_api_ready():
+def is_adspower_api_ready(timeout=15, retry=True):
     """Checks if the AdsPower local REST API is responding."""
     try:
-        resp = _api_request("get", "/status")
+        resp = _api_request("get", "/status", timeout=timeout, retry=retry)
         if resp.status_code != 200:
             return False
         return resp.json().get("code") == 0

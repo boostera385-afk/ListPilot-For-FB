@@ -28,9 +28,9 @@ class SearchMatchTests(unittest.TestCase):
         results.append({"href": "https://www.facebook.com/marketplace/item/123/", "text": ""})
         self.assertTrue(lv.found_in_search(results, {"title": "Roof repair", "listingId": "123"}))
 
-    def test_match_by_title_without_id(self):
+    def test_title_only_match_is_not_verified(self):
         results = [{"href": "/marketplace/item/5/", "text": "$40\nRoof Repair!\nDallas, TX"}]
-        self.assertTrue(lv.found_in_search(results, {"title": "roof repair", "listingId": ""}))
+        self.assertFalse(lv.found_in_search(results, {"title": "roof repair", "listingId": ""}))
         self.assertFalse(lv.found_in_search(results, {"title": "Fence", "listingId": ""}))
 
     def test_urls_are_encoded(self):
@@ -43,23 +43,24 @@ class ItemPageTests(unittest.TestCase):
         url = "https://www.facebook.com/marketplace/item/1/"
         self.assertEqual(lv.classify_item_page(url, "Roof repair\n$50", "Roof repair"), lv.LINK_ONLY)
         self.assertEqual(lv.classify_item_page(url, "This listing isn't available", "Roof repair"), lv.HIDDEN)
-        self.assertEqual(lv.classify_item_page("https://www.facebook.com/marketplace/", "x", "Roof repair"), lv.HIDDEN)
+        self.assertEqual(lv.classify_item_page("https://www.facebook.com/marketplace/", "x", "Roof repair"), lv.UNCLEAR)
         self.assertEqual(lv.classify_item_page(url, "Loading", "Roof repair"), lv.UNCLEAR)
 
 
 class RowTests(unittest.TestCase):
-    targets = [{"title": "A", "listingId": "1"}, {"title": "B", "listingId": ""}]
+    targets = [{"title": "A", "listingId": "1"}, {"title": "B", "listingId": "2"}]
 
     def test_all_found(self):
         values = lv.row_columns(self.targets, {"PK": [lv.SEARCH, lv.SEARCH], "US": [lv.SEARCH, lv.SEARCH]})
         self.assertEqual(values["Visibility"], ls.OK)
         self.assertEqual(values["PK Check"], "2/2 in search")
-        self.assertEqual(values["Visibility Details"], "A | ID 1 | PK: SEARCH | US: SEARCH\nB | PK: SEARCH | US: SEARCH")
+        self.assertIn("Sample: 2 of 2", values["Visibility Details"])
+        self.assertTrue(values["Visibility Details"].endswith("A | ID 1 | PK: SEARCH | US: SEARCH\nB | ID 2 | PK: SEARCH | US: SEARCH"))
 
     def test_hidden_beats_link_only(self):
         values = lv.row_columns(self.targets, {"PK": [lv.LINK_ONLY, lv.SEARCH], "US": [lv.HIDDEN, lv.SEARCH]})
         self.assertEqual(values["Visibility"], "HIDDEN: 1 result(s)")
-        self.assertEqual(values["US Check"], "1/2 in search, 1 hidden")
+        self.assertEqual(values["US Check"], "1/2 in search, 1 unavailable")
 
     def test_link_only_and_gaps(self):
         self.assertEqual(lv.overall_visibility({"PK": [lv.LINK_ONLY, lv.ERROR]}), "NOT_IN_SEARCH: 1 result(s)")

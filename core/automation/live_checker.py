@@ -9,6 +9,8 @@ from core.engine.exceptions import RetryableError, PermanentError, AutomationSto
 from core.services.sheets_service import update_column_value, update_column_values, append_live_history
 from core.utils.smart_match import loose_key
 from core.automation import listing_status as ls
+from core.automation import listing_visibility as lv
+from core.config import load_config
 
 FB_MARKETPLACE_HOME = "https://www.facebook.com/marketplace/?ref=bookmark"
 FB_MARKETPLACE_SELLING = "https://www.facebook.com/marketplace/you/selling"
@@ -103,11 +105,18 @@ def parse_old_card(card):
     reason = re.split(r"(?<=[.!?])\s+", notice)[0].rstrip(".") if notice else ""
 
     status = ""
-    for line in lines:
+    for index, line in enumerate(lines):
         match = re.match(r"^(.+?)\s*·\s*Listed on\s+\d", line, re.IGNORECASE)
         if match:
             status = match.group(1)
             break
+        # Facebook often places Active, NBSP and "· Listed on ..." in separate nodes.
+        if index + 1 < len(lines) and re.match(r"^[·•]?\s*Listed on\s+\d", lines[index + 1], re.IGNORECASE):
+            if ls.classify_status("", line) != ls.UNKNOWN:
+                status = line
+                break
+    if not status and any(re.match(r"^Listed on Marketplace\b", line, re.IGNORECASE) for line in lines):
+        status = "Listed on Marketplace"
     if _is_in_review(reason):
         status = "In review"
 
@@ -263,8 +272,19 @@ _READ_CARDS_JS = """
     }
   });
 
-  const headings = Array.from(document.querySelectorAll('h2'));
-  const headingIndex = headings.findIndex((h) => normalize(h.innerText) === normalize(sectionName));
+  const headingSelector = 'h1,h2,h3,[role="heading"]';
+  const sectionNames = new Set(['your listings', 'needs attention', 'all listings']);
+  const headings = Array.from(document.querySelectorAll(headingSelector)).filter(h =>
+    sectionNames.has(normalize(h.innerText)) &&
+    !Array.from(h.querySelectorAll(headingSelector)).some(child =>
+      normalize(child.innerText) === normalize(h.innerText))
+  );
+  let headingIndex = headings.findIndex((h) => normalize(h.innerText) === normalize(sectionName));
+  // Another card layout has one "Your listings" feed, without All/Needs sections.
+  if (headingIndex < 0 && sectionName === 'All listings' &&
+      !headings.some(h => normalize(h.innerText) === 'needs attention')) {
+    headingIndex = headings.findIndex(h => normalize(h.innerText) === 'your listings');
+  }
   if (headingIndex < 0) return [];
   const heading = headings[headingIndex];
   const nextHeading = headings[headingIndex + 1] || null;
@@ -277,32 +297,35 @@ _READ_CARDS_JS = """
   });
 
   const cards = [];
-  const seen = new Set();
+  const seen = [];
   markers.forEach((marker) => {
     const title = (marker.getAttribute('aria-label') || '').replace(/^More options for\\s+/i, '').trim();
     const wanted = normalize(title);
-    // Facebook renders duplicate responsive "More options" buttons for one
-    // card. Allow duplicates for the same title, but stop before the section.
+    // Stop at the nearest complete card. Climbing to a parent with the same
+    // title can merge distinct listings (e.g. two furniture cards at $35/$40).
     let card = marker;
     while (card.parentElement && card.parentElement !== document.body) {
       const parent = card.parentElement;
-      if (parent.querySelector('h2')) break;
-      const parentTitles = new Set(
-        allMarkers
-          .filter((item) => parent.contains(item))
-          .map((item) => normalize(
-            (item.getAttribute('aria-label') || '').replace(/^More options for\\s+/i, '')
-          ))
-      );
-      if (parentTitles.size > 1 || (parentTitles.size === 1 && !parentTitles.has(wanted))) break;
+      if (Array.from(parent.querySelectorAll(headingSelector)).some(h =>
+          sectionNames.has(normalize(h.innerText)))) break;
       card = parent;
+      const content = card.innerText || '';
+      if (normalize(content).includes(wanted) &&
+          /(?:[$€£₹]\\s?[\\d,.]+|\\bfree\\b)/i.test(content) &&
+          /listed on|clicks? on listing|\\bactive\\b|in review|rejected|sold|draft/i.test(content)) break;
     }
     const text = (card.innerText || '').trim();
-    const date = (text.match(/Listed on\\s+\\d{1,2}\\/\\d{1,2}/i) || [''])[0];
-    const clicks = (text.match(/\\d[\\d,]*\\s+clicks?\\s+on\\s+listing/i) || [''])[0];
-    const identity = [wanted, normalize(date), normalize(clicks)].join('|');
-    if (seen.has(identity)) return;
-    seen.add(identity);
+    if (!text || !normalize(text).includes(wanted)) return;
+    // Responsive duplicate buttons can live in nested wrappers of the same
+    // card. Deduplicate overlapping DOM roots, never by title/click count alone.
+    if (seen.some(n => n === card || n.contains(card) || card.contains(n))) return;
+    seen.push(card);
+    const signature = normalize(text);
+    if (card.getAttribute('data-lp-signature') !== signature) {
+      window.__lpCardSequence = (window.__lpCardSequence || 0) + 1;
+      card.setAttribute('data-lp-card-id', String(window.__lpCardSequence));
+      card.setAttribute('data-lp-signature', signature);
+    }
 
     const key = `${sectionName}-${cards.length}`;
     card.setAttribute('data-lp-card', key);
@@ -316,7 +339,7 @@ _READ_CARDS_JS = """
       const m = (a.getAttribute('href') || '').match(/(?:\\/item\\/|listing_id=)(\\d{6,})/);
       if (m) { listingId = m[1]; break; }
     }
-    cards.push({ key, title, text, listingId });
+    cards.push({ key, title, text, listingId, cardId: card.getAttribute('data-lp-card-id') });
   });
   return cards;
 }
@@ -325,13 +348,15 @@ _READ_CARDS_JS = """
 _EXPAND_SECTION_JS = """
 (sectionName) => {
   const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  const heading = Array.from(document.querySelectorAll('h2')).find(
+  const headingSelector = 'h1,h2,h3,[role="heading"]';
+  const heading = Array.from(document.querySelectorAll(headingSelector)).find(
     (item) => normalize(item.innerText) === normalize(sectionName)
   );
   if (!heading) return false;
   let node = heading.parentElement;
   for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
-    if (node.querySelectorAll('h2').length !== 1) continue;
+    if (Array.from(node.querySelectorAll(headingSelector)).filter(h =>
+      normalize(h.innerText) === normalize(sectionName)).length !== 1) continue;
     const button = Array.from(node.querySelectorAll('[role="button"], button')).find(
       (item) => normalize(item.innerText) === 'show'
     );
@@ -605,6 +630,10 @@ _CLICK_CLEAR_FILTERS_JS = r"""
 _OLD_CARD_SELECTOR = '[aria-label^="More options for "]'
 
 
+def _old_heading_selector(text):
+    return f':is(h1, h2, h3, [role="heading"]):has-text("{text}")'
+
+
 def ensure_default_listings_view(
     page, sleep, log,
     url=FB_SELLER_LISTINGS,
@@ -714,14 +743,16 @@ def open_listing_details(page, row, sleep, log, with_reason=False):
     return details
 
 
-def read_first_listings(page, sleep, log):
+def read_first_listings(page, sleep, log, with_details=True):
     """Details of the first Active and first Needs attention listing.
 
     Returns ``(active_first, needs_first)`` (either may be None when the tab
     is empty), or None when the page is not the new "Your listings" table.
     """
     try:
-        page.wait_for_selector('table[aria-label="Your listings"]', timeout=15000)
+        page.wait_for_selector('table[aria-label="Your listings"], ' + _OLD_CARD_SELECTOR, timeout=8000)
+        if not page.locator('table[aria-label="Your listings"]').count():
+            return None
     except Exception:
         return None
     ensure_default_listings_view(page, sleep, log)
@@ -755,8 +786,10 @@ def read_first_listings(page, sleep, log):
         if not rows:
             continue
         first = dict(rows[0])
-        log(f"Opening the first {section} listing '{first.get('title')}' to read its date...")
-        details = open_listing_details(page, first, sleep, log, with_reason=tab_id != "active")
+        details = {}
+        if with_details:
+            log(f"Opening the first {section} listing '{first.get('title')}' to read its date...")
+            details = open_listing_details(page, first, sleep, log, with_reason=tab_id != "active")
         for key in ("listed", "location", "reason"):
             if details.get(key):
                 first[key] = details[key]
@@ -767,10 +800,13 @@ def read_first_listings(page, sleep, log):
 
 # --- Older UI (/marketplace/you/selling cards) -----------------------------
 
-def read_old_section(page, section_name, sleep):
+def read_old_section(page, section_name, sleep, collect_all=False, deadline=None):
     """Cards of one section ("Needs attention" / "All listings"), newest first."""
     try:
-        page.wait_for_selector(f'h2:has-text("{section_name}")', state="visible", timeout=6000)
+        selector = _old_heading_selector(section_name)
+        if section_name == SECTION_ALL_LISTINGS:
+            selector += ", " + _old_heading_selector("Your listings")
+        page.wait_for_selector(selector, state="visible", timeout=6000)
     except Exception:
         return []
     try:
@@ -779,11 +815,35 @@ def read_old_section(page, section_name, sleep):
             sleep(0.8)
     except Exception:
         pass
-    try:
-        cards = page.evaluate(_READ_CARDS_JS, section_name)
-    except Exception:
-        return []
-    return cards if isinstance(cards, list) else []
+    collected, stable = {}, 0
+    for _ in range(120 if collect_all else 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        try:
+            cards = page.evaluate(_READ_CARDS_JS, section_name) or []
+        except Exception:
+            break
+        if not isinstance(cards, list):
+            break
+        if not collect_all:
+            return cards
+        before = len(collected)
+        for card in cards:
+            key = card.get("listingId") or card.get("cardId") or card.get("key")
+            collected[key] = card
+        stable = stable + 1 if len(collected) == before else 0
+        if not cards or stable >= 3 or len(collected) >= MAX_SCAN_ROWS:
+            break
+        page.evaluate(r"""(section) => {
+            const cards = Array.from(document.querySelectorAll('[data-lp-card]'))
+                .filter(n => (n.getAttribute('data-lp-card') || '').startsWith(section + '-'));
+            const last = cards[cards.length - 1];
+            const before = window.scrollY;
+            if (last) last.scrollIntoView({block: 'end'});
+            if (window.scrollY === before) window.scrollBy(0, Math.max(200, innerHeight * 0.8));
+        }""", section_name)
+        sleep(random.uniform(0.6, 1.1))
+    return list(collected.values())
 
 
 def _back_to_selling_page(page, sleep, start_url):
@@ -822,7 +882,7 @@ def open_old_card_details(page, card, sleep, log, with_reason=False):
     return details
 
 
-def read_first_listings_old_ui(page, sleep, log):
+def read_first_listings_old_ui(page, sleep, log, with_details=True):
     """Details of the first All listings and first Needs attention card.
 
     Returns ``(all_first, needs_first)`` (either may be None), or None when
@@ -830,7 +890,8 @@ def read_first_listings_old_ui(page, sleep, log):
     """
     try:
         page.wait_for_selector(
-            f'h2:has-text("{SECTION_ALL_LISTINGS}"), h2:has-text("{SECTION_NEEDS_ATTENTION}")',
+            ", ".join(_old_heading_selector(title) for title in
+                      (SECTION_ALL_LISTINGS, SECTION_NEEDS_ATTENTION, "Your listings")),
             timeout=15000,
         )
     except Exception:
@@ -839,7 +900,7 @@ def read_first_listings_old_ui(page, sleep, log):
         page, sleep, log,
         url=FB_MARKETPLACE_SELLING,
         search_label="Search your listings",
-        ready_selector=f'h2:has-text("{SECTION_ALL_LISTINGS}")',
+        ready_selector=", ".join(_old_heading_selector(title) for title in (SECTION_ALL_LISTINGS, "Your listings")),
         items_selector=_OLD_CARD_SELECTOR,
     )
     try:
@@ -856,8 +917,10 @@ def read_first_listings_old_ui(page, sleep, log):
         if not cards:
             continue
         first = parse_old_card(cards[0])
-        log(f"Opening the first {section} listing '{first.get('title')}' to read its date...")
-        details = open_old_card_details(page, cards[0], sleep, log, with_reason=section == SECTION_NEEDS_ATTENTION)
+        details = {}
+        if with_details:
+            log(f"Opening the first {section} listing '{first.get('title')}' to read its date...")
+            details = open_old_card_details(page, cards[0], sleep, log, with_reason=section == SECTION_NEEDS_ATTENTION)
         for key in ("listed", "location", "clicks"):
             if details.get(key) and not (key == "clicks" and first.get("clicks")):
                 first[key] = details[key]
@@ -1032,10 +1095,16 @@ def read_all_listings(page, sleep, log):
 
 def read_all_listings_old_ui(page, sleep):
     """Every card of the older layout's two sections, as ``(listings, tab_counts)``."""
-    listings, tab_counts = [], {}
+    listings, tab_counts, notes = [], {}, []
+    deadline = time.monotonic() + SCAN_BUDGET_SECONDS
     for section in (SECTION_NEEDS_ATTENTION, SECTION_ALL_LISTINGS):
-        cards = read_old_section(page, section, sleep)
+        if time.monotonic() >= deadline:
+            notes.append(f"'{section}' section skipped (scan time limit)")
+            continue
+        cards = read_old_section(page, section, sleep, collect_all=True, deadline=deadline)
         tab_counts[section] = len(cards)
+        if len(cards) >= MAX_SCAN_ROWS or time.monotonic() >= deadline:
+            notes.append(f"'{section}' section reached the scan limit")
         for card in cards:
             parsed = parse_old_card(card)
             listings.append({
@@ -1050,7 +1119,19 @@ def read_all_listings_old_ui(page, sleep):
                 "tab": section,
                 "state": ls.classify_status(section, parsed["status"], parsed["reason"]),
             })
-    return listings, tab_counts, []
+    # The sidebar count is a lower bound, not a substitute for reading cards.
+    try:
+        claimed = page.evaluate(r"""() => {
+            const match = document.body.innerText.match(/\b(\d[\d,]*) active listings\b/i);
+            return match ? Number(match[1].replace(/,/g, '')) : 0;
+        }""")
+        warning = ls.tab_total_mismatch({"Marketplace profile": claimed}, ls.dedupe_listings(listings))
+        if warning:
+            notes.append(warning)
+    except Exception:
+        pass
+    _scroll_to_top(page)
+    return listings, tab_counts, notes
 
 
 # --- Diagnostics and navigation fallback --------------------------------------
@@ -1112,6 +1193,7 @@ def open_selling_from_marketplace_home(page, sleep, log):
 
 def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, stop_event=None):
     post = post or {}
+    options = post.get("_buyer_options") or lv.BuyerOptions.from_settings(load_config())
 
     def log(msg):
         logger(msg)
@@ -1161,6 +1243,18 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
     target_sheet = post.get("_target_sheet", LIVE_CHECKER_SHEET)
     profile_label = post.get("profile name") or post.get("Profile Name") or post.get("profileName") or post.get("id")
 
+    def buyer_columns(has_live=False):
+        active = dict(options.checkers)
+        pending = bool(active and has_live)
+        return {
+            "PK Check": "Waiting" if pending and "PK" in active else "Not checked" if "PK" in active else "Off",
+            "US Check": "Waiting" if pending and "US" in active else "Not checked" if "US" in active else "Off",
+            "Visibility": "PENDING" if pending else "SKIPPED" if not active else "NOT_CHECKED",
+            "Visibility Details": f"Buyer sample: up to {options.limit} live listings per enabled buyer. Not a full visibility audit."
+                if pending else "Buyer checks off." if not active else "No verified live listings to check.",
+            "Visibility Checked": "",
+        } if target_sheet == LIVE_CHECKER_SHEET else {}
+
     def write_columns(values):
         """One batched sheet write; failures are logged, never fatal."""
         if not row_number:
@@ -1201,8 +1295,17 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             post["_live_retried"] = True
             log(f"{result}. Trying once more with a fresh page...")
             raise RetryableError(result)
-        values = {"Check Result": result, "Last Checked": ls.timestamp()}
+        # A failed read must not make a previous run's counts look freshly verified.
+        values = {
+            "Check Result": result, "Last Checked": ls.timestamp(),
+            "Total Listings": "", "Live Count": "", "Pending Count": "", "Rejected Count": "",
+            "Other Count": "", "Status Summary": "", "Listing Details": "",
+            "All Listings": "", "Needs Attention": "",
+        }
         values.update(extra or {})
+        values.update(buyer_columns())
+        post.pop("_live_counts", None)
+        post.pop("_live_listings", None)
         write_columns(values)
         record_history(code)
         post["_live_check"] = code
@@ -1212,6 +1315,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         log(f"All listings: {all_summary}")
         log(f"Needs attention: {needs_summary}")
         values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp()}
+        values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE))))
         headline = ""
         if scan and scan["total"]:
             counts = scan["counts"]
@@ -1241,11 +1345,13 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         record_history(post["_live_check"], scan if scan and scan["total"] else None)
         set_state(AutomationState.SUCCESS)
         prefix = f"{headline}; " if headline else ""
+        if post["_live_check"] == "PARTIAL":
+            prefix = f"{values['Check Result']}; {prefix}"
         return True, f"{prefix}All listings: {all_summary}; Needs attention: {needs_summary}"
 
     def read_new_layout():
         """(firsts, scan) from the new table, "empty" for a table with no rows, or None."""
-        firsts = read_first_listings(page, interruptible_sleep, log)
+        firsts = read_first_listings(page, interruptible_sleep, log, with_details=options.open_details)
         if firsts is None:
             return None
         if not (firsts[0] or firsts[1]):
@@ -1255,7 +1361,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
     def read_old_layout(attempts):
         for attempt in range(1, attempts + 1):
             check_stop()
-            firsts = read_first_listings_old_ui(page, interruptible_sleep, log)
+            firsts = read_first_listings_old_ui(page, interruptible_sleep, log, with_details=options.open_details)
             if firsts and (firsts[0] or firsts[1]):
                 return firsts, read_all_listings_old_ui(page, interruptible_sleep)
             if attempt < attempts:
@@ -1308,11 +1414,12 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             result = read_new_layout()
             if result is None:
                 log("New listings table not found. Using the older 'Your listings' layout...")
-                try:
-                    page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=45000)
-                except Exception:
-                    pass
-                interruptible_sleep(random.uniform(1.5, 3.5))
+                if page.url.split("?")[0].rstrip("/") != FB_MARKETPLACE_SELLING.rstrip("/"):
+                    try:
+                        page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    interruptible_sleep(0.5)
                 result = read_old_layout(3)
             if result is None and open_selling_from_marketplace_home(page, interruptible_sleep, log):
                 result = read_new_layout()

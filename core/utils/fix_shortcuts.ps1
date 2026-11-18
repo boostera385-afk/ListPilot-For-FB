@@ -15,6 +15,7 @@ param(
 try {
     $Root = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
     $launcher = Join-Path $Root 'Start_ListPilot.bat'
+    $icon = Join-Path $Root 'gui\assets\listpilot.ico'
     $marker = Join-Path $Root '.listpilot_shortcut'
     $description = 'ListPilot - Post, track and verify every Marketplace listing'
     $launcherNames = @('start_kitkat.bat', 'start_listpilot.bat', 'start automation.bat')
@@ -42,6 +43,12 @@ try {
                 $targetMissing = -not (Test-Path -LiteralPath $target)
                 $sameFolder = ([IO.Path]::GetDirectoryName($target).TrimEnd('\') -ieq $Root)
                 if (-not $targetMissing -and -not ($isOldName -and $sameFolder)) {
+                    # Refresh our existing shortcuts, but never brand another installation.
+                    if ($sameFolder -and (Test-Path -LiteralPath $icon) -and
+                        $link.IconLocation -ne "$icon,0") {
+                        $link.IconLocation = "$icon,0"
+                        $link.Save()
+                    }
                     $working = $true   # a working shortcut (here or to another install): leave it
                     continue
                 }
@@ -49,6 +56,7 @@ try {
                 $link.TargetPath = $launcher
                 $link.WorkingDirectory = $Root
                 $link.Description = $description
+                if (Test-Path -LiteralPath $icon) { $link.IconLocation = "$icon,0" }
                 $link.Save()
                 $working = $true
 
@@ -73,6 +81,7 @@ try {
             $link.TargetPath = $launcher
             $link.WorkingDirectory = $Root
             $link.Description = $description
+            if (Test-Path -LiteralPath $icon) { $link.IconLocation = "$icon,0" }
             $link.Save()
             Write-Output "Desktop shortcut created: $path"
         }
