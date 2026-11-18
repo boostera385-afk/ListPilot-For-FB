@@ -346,6 +346,14 @@ class LiveCheckerView(ctk.CTkFrame):
         def toast(message, color):
             run_on_ui(Toast.show, self, message, color)
 
+        try:
+            # Rows left as CLAIMED by a crashed run (over an hour old) are queued again.
+            freed_ok, freed = reset_rows_for_recheck(LIVE_CHECKER_SHEET, "stuck")
+            if freed_ok and freed:
+                logger_proxy(f"Freed {freed} row(s) stuck as CLAIMED from an earlier crashed run.")
+        except Exception:
+            pass  # an older deployed script has no "stuck" mode; not fatal
+
         if mode != "new":
             try:
                 ok, result = reset_rows_for_recheck(LIVE_CHECKER_SHEET, mode)

@@ -31,7 +31,7 @@ Random delays (1.5-3.5 s) separate navigation steps.
 - The table is virtualised, so the last row is scrolled into view until no new rows appear (cap 400 rows per tab).
 - "Problem" tabs are read first and `Active` last, so a listing shown on two tabs is counted by its worst state.
 - Rows are de-duplicated by Facebook **listing ID**. Without an ID, rows are kept apart by tab + position (new table) or by title/price/date/clicks (older cards) - so many listings with the same title in different cities are not merged.
-- If fewer rows are read than a tab's badge claims, or a tab is skipped, `Check Result` becomes `PARTIAL: ...`.
+- If fewer rows are read than a tab's badge claims, a tab is skipped or cannot be opened, or some listings have an unrecognised status (usually a non-English account), `Check Result` becomes `PARTIAL: ...`.
 - A **240 s** budget per profile (`SCAN_BUDGET_SECONDS`) stops a slow account from holding a worker.
 
 ## 3. Listing statuses
@@ -54,6 +54,8 @@ Rules (`classify_status`): the row's own status/notice text wins; the tab label 
 | `LAYOUT_UNKNOWN` | Page loaded but matches no known layout |
 | `TIMEOUT` | Blank page / nothing loaded |
 
+`TIMEOUT` and `LAYOUT_UNKNOWN` are retried once with a fresh page before anything is written; the other codes are never retried. `NO_LISTINGS` zeroes the count columns so old numbers do not look current.
+
 Failure text includes the final URL, page language and the screenshot filename.
 
 **Diagnostics:** screenshots are saved to `debug/` next to `main.py` (newest 50 kept). They stay on this computer; they may contain account content, so do not share the folder carelessly.
@@ -66,10 +68,11 @@ Written to the **Live Checker** sheet (created automatically if missing):
 
 | Column | Content |
 |---|---|
-| `Status` | Queue marker (empty/Pending = to do; `CLAIMED` = running; `Posted`/`Failed: ...` = done) |
+| `Status` | Queue marker (empty/Pending = to do; `CLAIMED` = running; `Success`/`Failed: ...` = done) |
 | `Responses` | Messenger unread badge |
 | `All Listings` / `Needs Attention` | First listing of each tab (older v1 summary, kept) |
-| `Total Listings`, `Live Count`, `Pending Count`, `Rejected Count` | Full-scan counts |
+| `Total Listings`, `Live Count`, `Pending Count`, `Rejected Count`, `Other Count` | Full-scan counts. `Other Count` = removed, expired, sold, draft and unknown, so Total = Live + Pending + Rejected + Other |
+| `Status Summary` | e.g. `3 LIVE, 1 PENDING, 2 SOLD` |
 | `Listing Details` | One line per listing: `LIVE \| Title \| 3 clicks \| 1 msg \| ID 123` (first 40) |
 | `Check Result` | Code from section 4 |
 | `Last Checked` | `YYYY-MM-DD HH:MM` |
@@ -85,7 +88,7 @@ Written to the **Live Checker** sheet (created automatically if missing):
 | Re-check failed profiles | `Failed...` status or `Check Result` not `OK` |
 | Re-check every profile | All finished rows |
 
-Re-check modes only clear `Status` on finished rows, then the normal pending fetch picks them up. Rows that are `CLAIMED` are never touched. A row stuck as `CLAIMED` after a crash must be reset by hand (it cannot be told apart from a row another machine is running).
+Re-check modes only clear `Status` on finished rows, then the normal pending fetch picks them up. Rows that are `CLAIMED` are never touched. A row left as `CLAIMED` for over an hour (a crashed run) is freed automatically at the start of the next run. Each claim stores a timestamp note on the Status cell; rows claimed by an older script have none and are freed too.
 
 At the end of a run the log shows total listings by status and profiles with problems by code.
 
@@ -108,7 +111,7 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 
 File: `core/assets/apps_script.js`. **Redeploy after any change** (Extensions -> Apps Script -> paste -> run `setupSheets` once -> Deploy -> New version).
 
-Actions added: `updateColumnValues` (batched write), `appendLiveHistory`, `resetForRecheck`. New auto-created columns: see section 5.
+Actions added: `updateColumnValues` (batched write), `appendLiveHistory`, `resetForRecheck` (modes `pending`, `failed`, `all`, `stuck`). New auto-created columns: see section 5.
 
 Safety: every written string goes through `setCellSafely_` - values starting with `= + - @` are stored as text (listing titles are untrusted; `=IMPORTXML(...)` must not run), and cells are capped at 50,000 characters.
 
@@ -123,7 +126,7 @@ Compatibility: with an *old* deployed script the app falls back to one request p
 | `core/services/sheets_service.py` | `update_column_values`, `append_live_history`, `reset_rows_for_recheck` |
 | `gui/views/live_checker_view.py` | Mode dropdown, concurrency, end-of-run totals |
 | `core/assets/apps_script.js` | Sheet-side actions and safety |
-| `tests/` | 25 unit tests |
+| `tests/` | Unit tests (pure logic, sheet helpers) |
 
 Run tests (from the project folder): `.venv\Scripts\python.exe -m unittest discover -s tests -t .`
 
@@ -140,6 +143,5 @@ Run tests (from the project folder): `.venv\Scripts\python.exe -m unittest disco
 
 - No matching of results back to the separate **posting** sheet (title + city); `Listing Details` carries IDs/titles to allow it later.
 - No automatic account language change.
-- No automatic reset of rows stuck as `CLAIMED`.
 - Listing dates are read only for the first listing per tab (opening each listing would be slow and more detectable).
 - Per-tab row cap 400; scan time limit 240 s per profile.

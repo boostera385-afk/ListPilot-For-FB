@@ -256,10 +256,10 @@ def summarize_table_row(row):
 _READ_CARDS_JS = """
 (sectionName) => {
   const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  document.querySelectorAll('[data-kk-card]').forEach((n) => {
-    if ((n.getAttribute('data-kk-card') || '').startsWith(sectionName + '-')) {
-      n.querySelectorAll('[data-kk-title]').forEach((t) => t.removeAttribute('data-kk-title'));
-      n.removeAttribute('data-kk-card');
+  document.querySelectorAll('[data-lp-card]').forEach((n) => {
+    if ((n.getAttribute('data-lp-card') || '').startsWith(sectionName + '-')) {
+      n.querySelectorAll('[data-lp-title]').forEach((t) => t.removeAttribute('data-lp-title'));
+      n.removeAttribute('data-lp-card');
     }
   });
 
@@ -305,13 +305,18 @@ _READ_CARDS_JS = """
     seen.add(identity);
 
     const key = `${sectionName}-${cards.length}`;
-    card.setAttribute('data-kk-card', key);
+    card.setAttribute('data-lp-card', key);
     const candidates = Array.from(card.querySelectorAll('span, div')).filter((el) => {
       if (normalize(el.innerText) !== wanted) return false;
       return !Array.from(el.children).some((child) => normalize(child.innerText) === wanted);
     });
-    if (candidates.length) candidates[0].setAttribute('data-kk-title', '1');
-    cards.push({ key, title, text });
+    if (candidates.length) candidates[0].setAttribute('data-lp-title', '1');
+    let listingId = '';
+    for (const a of card.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(/(?:\\/item\\/|listing_id=)(\\d{6,})/);
+      if (m) { listingId = m[1]; break; }
+    }
+    cards.push({ key, title, text, listingId });
   });
   return cards;
 }
@@ -798,9 +803,9 @@ def open_old_card_details(page, card, sleep, log, with_reason=False):
     key = card.get("key")
     start_url = page.url
     try:
-        target = page.locator(f'[data-kk-card="{key}"] [data-kk-title]').first
+        target = page.locator(f'[data-lp-card="{key}"] [data-lp-title]').first
         if target.count() == 0:
-            target = page.locator(f'[data-kk-card="{key}"] [role="button"][aria-label]').first
+            target = page.locator(f'[data-lp-card="{key}"] [role="button"][aria-label]').first
         try:
             target.click(timeout=5000)
         except Exception:
@@ -978,7 +983,12 @@ def read_all_listings(page, sleep, log):
         return None
 
     # Problem tabs first, so a listing shown on both is counted by its worst state.
-    tabs.sort(key=lambda tab: _tab_label(tab.get("text")).lower().startswith("active"))
+    # The "active" tab id is language independent; the label is only a fallback.
+    def _is_active_tab(tab):
+        return tab.get("id") == "active" or _tab_label(tab.get("text")).lower().startswith("active")
+
+    tabs.sort(key=_is_active_tab)
+    active_id = next((tab["id"] for tab in tabs if _is_active_tab(tab)), "active")
     listings, tab_counts, notes, previous = [], {}, [], None
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
     for tab in tabs:
@@ -991,6 +1001,7 @@ def read_all_listings(page, sleep, log):
             continue
         if not _open_tab(page, tab["id"], sleep):
             log(f"Could not open the '{label}' tab; skipping it.")
+            notes.append(f"'{label}' tab could not be opened")
             continue
         rows = []
         for _ in range(3):
@@ -1008,7 +1019,7 @@ def read_all_listings(page, sleep, log):
         if warning:
             log(f"Note: '{label}' tab: {warning}.")
             notes.append(f"'{label}' tab: {warning}")
-    _open_tab(page, "active", sleep)
+    _open_tab(page, active_id, sleep)
     return listings, tab_counts, notes
 
 
@@ -1028,7 +1039,7 @@ def read_all_listings_old_ui(page, sleep):
                 "listed": parsed["listed"],
                 "clicksCount": parse_count(parsed["clicks"]),
                 "messagesCount": None,
-                "listingId": "",
+                "listingId": _clean(card.get("listingId")),
                 "tab": section,
                 "state": ls.classify_status(section, parsed["status"], parsed["reason"]),
             })
@@ -1172,10 +1183,20 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         except Exception as exc:
             log(f"Note: could not save the Live History row: {exc}")
 
-    def fail(code, detail):
-        """Record why the scan failed in the sheet, then stop this profile."""
+    def fail(code, detail, extra=None):
+        """Record why the scan failed in the sheet, then stop this profile.
+
+        A slow or half-loaded page (TIMEOUT / LAYOUT_UNKNOWN) gets one quiet
+        retry first: nothing is written to the sheet until the final attempt.
+        """
         result = ls.format_check_result(code, detail)
-        write_columns({"Check Result": result, "Last Checked": ls.timestamp()})
+        if code in ls.RETRYABLE_CODES and not post.get("_live_retried"):
+            post["_live_retried"] = True
+            log(f"{result}. Trying once more with a fresh page...")
+            raise RetryableError(result)
+        values = {"Check Result": result, "Last Checked": ls.timestamp()}
+        values.update(extra or {})
+        write_columns(values)
         record_history(code)
         post["_live_check"] = code
         raise PermanentError(result)
@@ -1194,6 +1215,8 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 "Live Count": counts.get(ls.LIVE, 0),
                 "Pending Count": counts.get(ls.PENDING, 0),
                 "Rejected Count": counts.get(ls.REJECTED, 0),
+                "Other Count": scan["other"],
+                "Status Summary": headline,
                 "Listing Details": scan["details"],
             })
             post["_live_counts"] = counts
@@ -1290,7 +1313,11 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                     result = read_old_layout(1)
 
             if result == "empty":
-                fail(ls.NO_LISTINGS, "the listings table is empty (this profile may have no listings)")
+                # Zero the counts so an old scan's numbers do not look current.
+                fail(ls.NO_LISTINGS, "the listings table is empty (this profile may have no listings)", extra={
+                    "Total Listings": 0, "Live Count": 0, "Pending Count": 0, "Rejected Count": 0,
+                    "Other Count": 0, "Status Summary": "No listings", "Listing Details": "",
+                })
             if result is None:
                 if page.is_closed():
                     raise RetryableError("The browser page closed before listings could be read.")

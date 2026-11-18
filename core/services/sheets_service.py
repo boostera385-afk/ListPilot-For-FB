@@ -73,94 +73,6 @@ def _status_update_result(response, success_message):
 
     return True, success_message
 
-def fetch_pending_profiles():
-    """Fetches profiles that have an empty status from Google Sheets."""
-    url = get_script_url()
-    if not url:
-        return False, "Google Apps Script URL is not set in Settings."
-        
-    try:
-        response = _requests_retry("get", f"{url}?action=getPendingProfiles", timeout=10)
-        data = response.json()
-        
-        if data.get("success"):
-            return True, data.get("data", [])
-        else:
-            return False, data.get("error", "Unknown error from Google Apps Script.")
-    except requests.exceptions.RequestException as e:
-        return False, _friendly_connection_error(e)
-    except Exception:
-        return False, "Google Sheets returned an invalid response."
-
-def update_profile_status(row_number, status, notes="", sheet_name="Incog Profile Creation"):
-    """Updates the status and notes of a specific row in Google Sheets."""
-    url = get_script_url()
-    if not url:
-        return False, "Google Apps Script URL is not set in Settings."
-        
-    payload = {
-        "action": "updateStatus",
-        "sheetName": sheet_name,
-        "rowNumber": row_number,
-        "status": status,
-        "notes": notes
-    }
-    
-    try:
-        response = _requests_retry("post", url, json=payload, timeout=10)
-        data = response.json()
-        
-        if data.get("success"):
-            return True, "Success"
-        else:
-            return False, data.get("error", "Unknown error from Google Apps Script.")
-    except requests.exceptions.RequestException as e:
-        return False, _friendly_connection_error(e)
-    except Exception:
-        return False, "Google Sheets returned an invalid response."
-
-def fetch_pending_nd_accounts():
-    url = get_script_url()
-    if not url:
-        return False, "Google Apps Script URL is not set."
-        
-    try:
-        response = _requests_retry("get", url, params={"action": "getPendingNDAccounts"}, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("success"):
-                return True, data.get("data", [])
-            else:
-                return False, data.get("error", "Unknown error")
-        else:
-            return False, _friendly_http_error(response.status_code)
-    except requests.exceptions.RequestException as e:
-        return False, _friendly_connection_error(e)
-    except Exception:
-        return False, "Google Sheets returned an invalid response."
-
-def update_nd_account_status(row_number, status, notes=""):
-    url = get_script_url()
-    if not url:
-        return False, "Google Apps Script URL is not set."
-        
-    if notes:
-        status = f"{status} | {notes}"
-        
-    payload = {
-        "action": "updateNDStatus",
-        "rowNumber": row_number,
-        "status": status
-    }
-    
-    try:
-        response = _requests_retry("post", url, json=payload, timeout=15)
-        return _status_update_result(response, "Status updated")
-    except requests.exceptions.RequestException as e:
-        return False, _friendly_connection_error(e)
-    except Exception:
-        return False, "Google Sheets returned an invalid response."
-
 def fetch_pending_rows(sheet_name):
     url = get_script_url()
     if not url:
@@ -291,7 +203,7 @@ def append_live_history(profile, total=None, live=None, pending=None, rejected=N
         return False, "Google Sheets returned an invalid response."
 
 
-RECHECK_MODES = ("pending", "failed", "all")
+RECHECK_MODES = ("pending", "failed", "all", "stuck")
 
 
 def reset_rows_for_recheck(sheet_name, mode):

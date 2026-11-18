@@ -25,6 +25,10 @@ LANG_NOT_EN = "LANG_NOT_EN"
 LAYOUT_UNKNOWN = "LAYOUT_UNKNOWN"
 TIMEOUT = "TIMEOUT"
 
+# Reasons that are worth one automatic retry (a slow or half-loaded page).
+# Logged out, checkpoint, language and "no listings" are never retried.
+RETRYABLE_CODES = (TIMEOUT, LAYOUT_UNKNOWN)
+
 # Order used when listing counts in summaries.
 STATUS_ORDER = (LIVE, PENDING, REJECTED, REMOVED, EXPIRED, SOLD, DRAFT, UNKNOWN)
 
@@ -71,6 +75,12 @@ def count_statuses(listings):
         state = (item or {}).get("state") or UNKNOWN
         counts[state] = counts.get(state, 0) + 1
     return counts
+
+
+def other_count(counts):
+    """Listings that are not LIVE, PENDING or REJECTED (removed, expired, sold, draft, unknown)."""
+    counts = counts or {}
+    return sum(v for k, v in counts.items() if k not in (LIVE, PENDING, REJECTED))
 
 
 def format_counts(counts):
@@ -147,8 +157,15 @@ def build_scan_result(listings, tab_counts=None, notes=None):
     """
     unique = dedupe_listings(listings)
     counts = count_statuses(unique)
+    notes = list(notes or [])
+    unknown = counts.get(UNKNOWN, 0)
+    if unknown:
+        # Classification reads English wording; a non-English account (or new
+        # Facebook wording) ends up here, so say so instead of reporting OK.
+        notes.append(f"{unknown} of {len(unique)} listings had an unrecognised status (check the page language)")
     return {
-        "notes": list(notes or []),
+        "notes": notes,
+        "other": other_count(counts),
         "total": len(unique),
         "counts": counts,
         "headline": format_counts(counts),

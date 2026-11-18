@@ -40,7 +40,7 @@ function setCellSafely_(range, value) {
 // "Responses" = messages on the just-published listing (from the live check).
 // "All Listings" / "Needs Attention" = the first listing of each tab.
 const AUTO_COLUMNS = {};
-const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Listing Details", "Check Result", "Last Checked"];
+const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count", "Status Summary", "Listing Details", "Check Result", "Last Checked"];
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
 // Buyer-side check from the Pakistani and USA checker accounts.
 const VISIBILITY_COLUMNS = ["PK Check", "US Check", "Visibility", "Visibility Details", "Visibility Checked"];
@@ -372,13 +372,14 @@ function doPost(e) {
 
     // Clears Status on finished rows so getPendingRows queues them again.
     // mode: "pending" (Pending Count > 0), "failed" (Failed status or Check
-    // Result not OK) or "all". Rows being processed (CLAIMED) are never touched.
+    // Result not OK), "all", or "stuck" (CLAIMED for over an hour = crashed run).
+    // Other modes never touch rows being processed (CLAIMED).
     if (action === "resetForRecheck") {
       const targetSheetName = payload.sheetName || SHEET_LIVE_CHECKER;
       const sheet = getSheet_(targetSheetName);
       if(!sheet) return jsonOut_({success: false, error: "Sheet not found: " + targetSheetName});
       const mode = String(payload.mode || "");
-      if (["pending", "failed", "all"].indexOf(mode) === -1) return jsonOut_({success: false, error: "Unknown mode: " + mode});
+      if (["pending", "failed", "all", "stuck"].indexOf(mode) === -1) return jsonOut_({success: false, error: "Unknown mode: " + mode});
       ensureAutoColumns_(sheet);
 
       const lock = LockService.getScriptLock();
@@ -395,9 +396,20 @@ function doPost(e) {
         const data = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
         const statuses = data.map(row => [row[statusIdx]]);
         let reset = 0;
+        // "stuck": rows left as CLAIMED for over an hour (the run crashed). Rows
+        // claimed by an older script version have no timestamp and are treated as stuck.
+        const notes = mode === "stuck" ? sheet.getRange(2, statusIdx + 1, lastRow - 1, 1).getNotes() : null;
+        const STUCK_MS = 60 * 60 * 1000;
         data.forEach((row, i) => {
           if (!row.some(cell => String(cell).trim() !== "")) return;
           const status = String(row[statusIdx] == null ? "" : row[statusIdx]).trim().toLowerCase();
+          if (mode === "stuck") {
+            if (status !== "claimed") return;
+            const m = String(notes[i][0] || "").match(/Claimed (\S+)/);
+            const claimedAt = m ? Date.parse(m[1]) : NaN;
+            if (isNaN(claimedAt) || Date.now() - claimedAt > STUCK_MS) { statuses[i][0] = ""; reset++; }
+            return;
+          }
           if (status === "claimed" || isPendingStatus_(status)) return;  // running, or already queued
           const check = checkIdx === -1 ? "" : String(row[checkIdx] || "").trim();
           const pending = pendingIdx === -1 ? 0 : Number(row[pendingIdx]) || 0;
@@ -429,6 +441,7 @@ function doPost(e) {
         const currentStatus = cell.getValue().toString().trim().toLowerCase();
         if (isPendingStatus_(currentStatus)) {
             cell.setValue("CLAIMED");
+            cell.setNote("Claimed " + new Date().toISOString());  // lets "stuck" recheck spot crashed runs
             SpreadsheetApp.flush();
             return jsonOut_({success: true, claimed: true});
         }

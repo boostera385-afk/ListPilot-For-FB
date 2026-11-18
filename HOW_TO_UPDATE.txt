@@ -22,8 +22,9 @@ For a brand-new computer, use ListPilot_Automation_Ready.zip once. After that,
 use only ListPilot_Code_Update.zip for ordinary fixes and improvements.
 
 DESKTOP SHORTCUT (automatic):
-The launcher is now Start_ListPilot.bat. Old shortcuts to Start_Kitkat.bat keep
-working: the first time ListPilot starts, the shortcut is pointed to
-Start_ListPilot.bat and renamed "ListPilot". If you rename or move the ListPilot
+Start ListPilot only with Start_ListPilot.bat (the old Start_Kitkat.bat and
+Start Automation.bat launchers were removed). An old desktop shortcut to them is
+pointed to Start_ListPilot.bat and renamed "ListPilot" the next time you start
+Start_ListPilot.bat. If you rename or move the ListPilot
 folder, start Start_ListPilot.bat once from the new folder and the desktop
 shortcut is fixed the same way. If no shortcut exists, one is created once.

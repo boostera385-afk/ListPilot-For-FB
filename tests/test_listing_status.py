@@ -106,3 +106,34 @@ class TabTextTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScanQualityTests(unittest.TestCase):
+    def test_unknown_statuses_are_reported_as_a_note(self):
+        listings = [
+            {"title": "A", "listingId": "1", "state": ls.LIVE},
+            {"title": "B", "listingId": "2", "state": ls.UNKNOWN},
+        ]
+        scan = ls.build_scan_result(listings)
+        self.assertEqual(len(scan["notes"]), 1)
+        self.assertIn("1 of 2", scan["notes"][0])
+
+    def test_clean_scan_has_no_notes(self):
+        scan = ls.build_scan_result([{"title": "A", "listingId": "1", "state": ls.LIVE}])
+        self.assertEqual(scan["notes"], [])
+
+    def test_other_count_covers_everything_but_the_three_columns(self):
+        counts = {ls.LIVE: 3, ls.PENDING: 1, ls.REJECTED: 2, ls.SOLD: 4, ls.UNKNOWN: 1}
+        self.assertEqual(ls.other_count(counts), 5)
+        self.assertEqual(ls.other_count({}), 0)
+        scan = ls.build_scan_result([
+            {"title": "A", "listingId": "1", "state": ls.SOLD},
+            {"title": "B", "listingId": "2", "state": ls.LIVE},
+        ])
+        self.assertEqual(scan["other"], 1)
+
+    def test_only_slow_page_reasons_are_retried(self):
+        self.assertIn(ls.TIMEOUT, ls.RETRYABLE_CODES)
+        self.assertIn(ls.LAYOUT_UNKNOWN, ls.RETRYABLE_CODES)
+        for code in (ls.LOGGED_OUT, ls.CHECKPOINT, ls.NO_LISTINGS, ls.LANG_NOT_EN, ls.NO_MARKETPLACE):
+            self.assertNotIn(code, ls.RETRYABLE_CODES)
