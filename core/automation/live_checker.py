@@ -421,15 +421,19 @@ def _open_tab(page, tab_id, sleep):
         tab.click(timeout=5000)
     except Exception:
         return False
+    selected = False
     for _ in range(20):
         try:
             if (tab.get_attribute("aria-selected", timeout=1000) or "") == "true":
+                selected = True
                 break
         except Exception:
             pass
         sleep(0.3)
     sleep(1.2)
-    return True
+    # A tab that never became selected still shows the previous tab's rows;
+    # reading them would label them with the wrong tab.
+    return selected
 
 
 def read_seller_listings(page, sleep, wait_ms=15000):
@@ -874,14 +878,17 @@ _LIST_TABS_JS = r"""
 })).filter((t) => t.id && t.text)
 """
 
-# The listings table is virtualised: only rows near the viewport exist, so the
-# last row is scrolled into view repeatedly to load the rest.
+# The listings table is virtualised: only rows near the viewport exist. Scroll
+# one step at a time (never straight to the bottom, which would skip the rows
+# in between): bring the last rendered row to the bottom edge, or move down by
+# most of a screen when that does not move the page.
 _SCROLL_LISTINGS_JS = r"""
 () => {
   const rows = document.querySelectorAll('table[aria-label="Your listings"] tbody tr[role="row"]');
   const last = rows[rows.length - 1];
+  const before = window.scrollY;
   if (last) last.scrollIntoView({block: 'end'});
-  window.scrollTo(0, document.body.scrollHeight);
+  if (window.scrollY === before) window.scrollBy(0, Math.max(200, window.innerHeight * 0.8));
 }
 """
 
@@ -932,7 +939,7 @@ def _collect_table_rows(page, sleep, deadline=None):
     """Read the open tab's rows, scrolling until no new rows appear or time is up."""
     rows_by_key = {}
     stable = 0
-    for _ in range(60):
+    for _ in range(120):
         if deadline is not None and time.monotonic() > deadline:
             break
         try:

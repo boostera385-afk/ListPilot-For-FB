@@ -128,6 +128,8 @@ Compatibility: with an *old* deployed script the app falls back to one request p
 | `core/assets/apps_script.js` | Sheet-side actions and safety |
 | `tests/` | Unit tests (pure logic, sheet helpers) |
 
+**Virtual browser test** (`tests/test_live_flow_virtual.py`, ~70 s): a local fake of the seller page (status tabs, virtualised table, listing dialog) is driven by the real flow in headless Chromium, with sheet writes captured. Covers a 65-listing mixed account, empty table, a tab that will not open, a non-English account and logged out. It proves the logic and scrolling, not Facebook's real markup; that still needs section 8. Skipped when Chromium is not installed (`.venv\Scripts\python.exe -m playwright install chromium`).
+
 Run tests (from the project folder): `.venv\Scripts\python.exe -m unittest discover -s tests -t .`
 
 ---
