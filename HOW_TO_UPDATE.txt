@@ -1,22 +1,22 @@
-KITKAT QUICK UPDATE
+LISTPILOT QUICK UPDATE
 ===================
 
-For a computer that already has Kitkat installed:
+For a computer that already has ListPilot installed:
 
-1. Close Kitkat.
-2. Open Kitkat_Code_Update.zip.
-3. Extract everything directly into the existing Kitkat folder.
+1. Close ListPilot.
+2. Open ListPilot_Code_Update.zip.
+3. Extract everything directly into the existing ListPilot folder.
 4. Choose "Replace the files in the destination" if Windows asks.
-5. Start Kitkat normally.
+5. Start ListPilot normally.
 
-IMPORTANT: Do not delete the existing Kitkat folder before applying an update.
+IMPORTANT: Do not delete the existing ListPilot folder before applying an update.
 The existing .venv, settings, and installed libraries will be kept, so normal
 code updates will not download the requirements again.
 
 LIVE CHECK SETUP (one time after this update):
-Open "Google Sheets Setup" in Kitkat, copy the latest script into your Sheet's
+Open "Google Sheets Setup" in ListPilot, copy the latest script into your Sheet's
 Apps Script, run setupSheets once, then deploy a new Web App version. This adds
 the Live column automatically and keeps all existing sheet data.
 
-For a brand-new computer, use Kitkat_Automation_Ready.zip once. After that,
-use only Kitkat_Code_Update.zip for ordinary fixes and improvements.
+For a brand-new computer, use ListPilot_Automation_Ready.zip once. After that,
+use only ListPilot_Code_Update.zip for ordinary fixes and improvements.

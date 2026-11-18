@@ -4,7 +4,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-_LOGGER_NAME = "kitkat.automation"
+_LOGGER_NAME = "listpilot.automation"
 _CONFIGURE_LOCK = threading.Lock()
 
 
@@ -20,7 +20,7 @@ def _get_logger():
         log_dir = Path(__file__).resolve().parents[2] / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(
-            log_dir / "kitkat.log",
+            log_dir / "listpilot.log",
             maxBytes=2 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",

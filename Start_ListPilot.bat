@@ -1,9 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
-TITLE Kitkat Automation Launcher
+TITLE ListPilot Launcher
 cd /d "%~dp0"
 echo ==========================================
-echo Kitkat Automation
+echo ListPilot - Post, track and verify every Marketplace listing
 echo ==========================================
 
 :: 1. Check if Python is installed
@@ -35,7 +35,7 @@ IF %ERRORLEVEL% NEQ 0 (
     
     if not exist !PYTHON_CMD! (
         echo [ERROR] Could not locate the newly installed Python. 
-        echo Please close this window, restart your computer, and double-click Start_Kitkat again.
+        echo Please close this window, restart your computer, and double-click Start_ListPilot again.
         pause
         exit /b
     )
@@ -54,7 +54,7 @@ IF NOT EXIST ".venv\Scripts\python.exe" (
 
 :: 3. Install libraries only on first setup or when requirements.txt changes
 set VENV_PY=.venv\Scripts\python.exe
-set DEPS_MARKER=.venv\.kitkat_dependencies_v1.ready
+set DEPS_MARKER=.venv\.listpilot_dependencies_v1.ready
 IF EXIST "!DEPS_MARKER!" GOTO :launch
 
 !VENV_PY! core\utils\dependency_setup.py check >nul 2>&1
@@ -73,18 +73,18 @@ IF !ERRORLEVEL! NEQ 0 (
 :: 4. Launch the app
 :launch
 echo ==========================================
-echo Launching Kitkat...
+echo Launching ListPilot...
 echo ==========================================
 !VENV_PY! main.py
 
 echo.
-echo Kitkat has closed. Press any key to exit.
+echo ListPilot has closed. Press any key to exit.
 pause >nul
 exit /b 0
 
 :dependency_error
 echo.
 echo [ERROR] Required libraries could not be installed.
-echo Check your internet connection, then run Start_Kitkat again.
+echo Check your internet connection, then run Start_ListPilot again.
 pause
 exit /b 1

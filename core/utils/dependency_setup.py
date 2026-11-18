@@ -17,7 +17,7 @@ REQUIREMENTS_FILE = PROJECT_DIR / "requirements.txt"
 VENV_DIR = PROJECT_DIR / ".venv"
 # Bump this marker name (v1 -> v2) only when requirements.txt changes. The
 # launcher checks for this exact file and otherwise goes directly to the UI.
-MARKER_FILE = VENV_DIR / ".kitkat_dependencies_v1.ready"
+MARKER_FILE = VENV_DIR / ".listpilot_dependencies_v1.ready"
 
 PACKAGE_IMPORTS = {
     "customtkinter": "customtkinter",
@@ -68,7 +68,7 @@ def dependencies_are_current() -> tuple[bool, str]:
 
     expected = requirements_fingerprint()
     if not MARKER_FILE.exists():
-        # Adopt a working environment created by an older Kitkat launcher.
+        # Adopt a working environment created by an older ListPilot launcher.
         write_marker()
         return True, "existing environment adopted"
 
