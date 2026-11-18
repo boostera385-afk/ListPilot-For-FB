@@ -998,8 +998,12 @@ def _scroll_to_top(page):
         pass
 
 
-def _collect_table_rows(page, sleep, deadline=None):
-    """Read the open tab's rows, scrolling until no new rows appear or time is up."""
+def _collect_table_rows(page, sleep, deadline=None, expected=None):
+    """Read the open tab's rows, scrolling until no new rows appear or time is up.
+
+    ``expected`` is the count on the tab badge: once that many distinct rows are read
+    there is nothing left to scroll for, so it stops at once instead of waiting.
+    """
     rows_by_key = {}
     stable = 0
     for _ in range(120):
@@ -1014,6 +1018,8 @@ def _collect_table_rows(page, sleep, deadline=None):
             key = row.get("listingId") or f"{row.get('index')}|{row.get('title')}"
             rows_by_key.setdefault(key, row)
         if len(rows_by_key) >= MAX_SCAN_ROWS:
+            break
+        if expected and len(rows_by_key) >= expected:
             break
         stable = stable + 1 if len(rows_by_key) == before else 0
         if stable >= 3:
@@ -1075,7 +1081,7 @@ def read_all_listings(page, sleep, log):
             continue
         rows = []
         for _ in range(3):
-            rows = _collect_table_rows(page, sleep, deadline)
+            rows = _collect_table_rows(page, sleep, deadline, expected=badge)
             signature = tuple((r.get("listingId"), r.get("title")) for r in rows)
             if signature != previous:
                 break
