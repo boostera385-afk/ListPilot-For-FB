@@ -169,3 +169,29 @@ class SlowSearchRetryTests(unittest.TestCase):
         results, search = self.run_check([None, None])
         self.assertEqual(results, [lv.UNCLEAR])
         self.assertEqual(search.call_count, 2)
+
+
+class MidRunBlockTests(unittest.TestCase):
+    def run_check(self, blocked_answers):
+        targets = [{"title": "A", "listingId": "1", "price": "$5"}, {"title": "B", "listingId": "2", "price": "$6"}]
+        with mock.patch.object(vc, "sync_playwright", return_value=BuyerRuntimeTests.fake_browser(None)), \
+             mock.patch.object(vc, "_goto", return_value=True), \
+             mock.patch.object(vc, "_blocked_reason", side_effect=blocked_answers), \
+             mock.patch.object(vc, "_search", return_value="ID"), \
+             mock.patch.object(vc, "capture_diagnostics") as capture:
+            logs = []
+            results = vc.check_listings("debug", "PK", targets, logs.append, lambda _: None)
+        return results, logs, capture
+
+    def test_a_confirmed_block_stops_the_checker_with_a_reason_and_a_screenshot(self):
+        # startup ok, then blocked twice (the re-check confirms it)
+        results, logs, capture = self.run_check(["", "LOGGED_OUT", "LOGGED_OUT"])
+        self.assertEqual(results, [lv.ERROR, lv.ERROR])
+        capture.assert_called_once()
+        self.assertTrue(any("blocked mid-run (LOGGED_OUT)" in line for line in logs))
+
+    def test_a_passing_popup_does_not_stop_the_checker(self):
+        # startup ok, blocked once, clear on the re-check, then clear for the next listing
+        results, logs, capture = self.run_check(["", "CHECKPOINT", "", ""])
+        self.assertEqual(results, [lv.SEARCH, lv.SEARCH])
+        capture.assert_not_called()

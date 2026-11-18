@@ -189,3 +189,18 @@ class BuyerSummaryTests(unittest.TestCase):
         self.assertEqual(lv.summarize_buyer_rows([]), "")
         self.assertEqual(lv.summarize_buyer_rows(None), "")
         self.assertIn("1 listing checked", lv.summarize_buyer_rows([{"PK": lv.SEARCH}]))
+
+
+class UncheckedBuyerVerdictTests(unittest.TestCase):
+    def test_an_unchecked_buyer_is_not_hidden_behind_a_clean_verdict(self):
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.NOT_FOUND]), "Not in search (a buyer could not check)")
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.TEXT_MATCH]), "Visible (title + price) (a buyer could not check)")
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.SEARCH]), "Visible in search (a buyer could not check)")
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.NOT_FOUND]), "Visible to some buyers")
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.UNCLEAR]), "Not verified")
+
+    def test_summary_still_counts_them_by_what_was_seen(self):
+        rows = [{"PK": lv.ERROR, "US": lv.NOT_FOUND}, {"PK": lv.ERROR, "US": lv.SEARCH}]
+        text = lv.summarize_buyer_rows(rows)
+        self.assertIn("1 visible in search", text)
+        self.assertIn("1 not in search", text)

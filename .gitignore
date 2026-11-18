@@ -6,3 +6,4 @@ temp_images/
 config.json
 logs/
 .listpilot_shortcut
+layout_memory.json

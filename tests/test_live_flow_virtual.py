@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 from core.automation import listing_status as ls
+from core.utils import layout_memory
 from core.engine.exceptions import PermanentError, RetryableError
 
 try:
@@ -223,8 +224,8 @@ def _buyer_page(path_and_query):
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parts = self.path.split("?")[0].strip("/").split("/")
-        if parts and parts[0] == "oldlazy":
-            data = _old_lazy_page().encode("utf-8")
+        if parts and parts[0] in ("oldlazy", "oldfast"):
+            data = (_old_lazy_page() if parts[0] == "oldlazy" else _old_lazy_page(total=25, delay_ms=300)).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -328,6 +329,7 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
                 mock.patch.object(lc, "append_live_history", fake_history), \
                 mock.patch.object(lc.random, "uniform", lambda a, b: a * 0.4), \
                 mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep: 2), \
+                mock.patch.object(layout_memory, "_PATH", os.path.join(self.profile_dir, "layout_memory.json")), \
                 mock.patch.object(lc, "DEBUG_DIR", os.path.join(self.profile_dir, "debug")):
             outcome, error = None, None
             try:
@@ -435,6 +437,34 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         self.assertEqual(tab_counts.get("Needs attention"), 3, tab_counts)
         self.assertEqual(len(titles), 31, "every card of the slow feed must be read once")
         self.assertEqual(notes, [])
+
+    def test_remembered_old_layout_skips_the_table_wait(self):
+        import time as _time
+        from core.automation import live_checker as lc
+
+        writes = []
+        logs = []
+        memory = os.path.join(self.profile_dir, "layout_memory_flow.json")
+        post = {"rowNumber": 6, "profileName": "remembered-old"}
+        layout_memory.remember("remembered-old", "old", path=memory)
+        with mock.patch.object(layout_memory, "_PATH", memory), \
+                mock.patch.object(lc, "FB_SELLER_LISTINGS", self.base + "/mixed/marketplace/seller/listings/"), \
+                mock.patch.object(lc, "FB_MARKETPLACE_SELLING", self.base + "/oldfast/marketplace/you/selling"), \
+                mock.patch.object(lc, "update_column_values", lambda sheet, row, values: writes.append(dict(values)) or (True, "ok")), \
+                mock.patch.object(lc, "append_live_history", lambda *a, **k: (True, "ok")), \
+                mock.patch.object(lc.random, "uniform", lambda a, b: a * 0.4), \
+                mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep: 0), \
+                mock.patch.object(lc, "DEBUG_DIR", os.path.join(self.profile_dir, "debug")):
+            started = _time.monotonic()
+            lc.run_live_checker_flow(self.debug_url, post, logger=logs.append)
+            elapsed = _time.monotonic() - started
+        merged = {}
+        for values in writes:
+            merged.update(values)
+        self.assertEqual(merged["Total Listings"], 28, logs[-6:])
+        self.assertTrue(any("remembered for this profile" in line for line in logs))
+        self.assertFalse(any("New listings table not found" in line for line in logs))
+        self.assertLess(elapsed, 14, "the 15 s wait for a table that does not exist must be skipped")
 
     def test_logged_out_is_permanent_and_recorded(self):
         outcome, error, sheet, history, logs, post = self.run_flow("logged_out")

@@ -196,14 +196,17 @@ def listing_verdict(states):
     if not states:
         return "Not checked"
     found = [s for s in states if s in (SEARCH, TEXT_MATCH)]
+    missed = [s for s in states if s in (LINK_ONLY, NOT_FOUND)]
+    unchecked = [s for s in states if s in (UNCLEAR, ERROR)]
     if HIDDEN in states:
         return "Hidden from a buyer"
-    if len(found) == len(states):
-        return "Visible in search" if SEARCH in found else "Visible (title + price)"
+    note = " (a buyer could not check)" if unchecked else ""
+    if found and not missed:
+        return ("Visible in search" if SEARCH in found else "Visible (title + price)") + note
     if found:
         return "Visible to some buyers"
-    if any(s in (LINK_ONLY, NOT_FOUND) for s in states):
-        return "Not in search"
+    if missed:
+        return "Not in search" + note
     return "Not verified"
 
 
@@ -221,7 +224,7 @@ def summarize_buyer_rows(rows):
             counts["some"] += 1
         elif verdict.startswith("Hidden"):
             counts["hidden"] += 1
-        elif verdict == "Not in search":
+        elif verdict.startswith("Not in search"):
             counts["not"] += 1
         else:
             counts["unverified"] += 1

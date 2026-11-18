@@ -8,6 +8,7 @@ from core.engine.state_machine import AutomationState
 from core.engine.exceptions import RetryableError, PermanentError, AutomationStopped
 from core.services.sheets_service import update_column_value, update_column_values, append_live_history
 from core.utils.smart_match import loose_key
+from core.utils import layout_memory
 from core.automation import listing_status as ls
 from core.automation import listing_visibility as lv
 from core.config import load_config
@@ -807,7 +808,7 @@ def read_first_listings(page, sleep, log, with_details=True):
 # How long to wait for a lazy-loading feed to add more cards after a scroll. Three browsers on one
 # connection can take several seconds per batch, and a scan that gives up early reports a shorter
 # account as if it were complete (the same profile read 38, 18 and 28 listings in one afternoon).
-FEED_GROWTH_WINDOW = 4.0
+FEED_GROWTH_WINDOW = 3.5
 FEED_FIRST_CARD_WAIT_MS = 8000
 
 _OLD_MARKER_COUNT_JS = r"""
@@ -878,7 +879,7 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
     patient = collect_all and section_name == SECTION_ALL_LISTINGS
     window = FEED_GROWTH_WINDOW if patient else 1.5
     need_idle = 2 if patient else 1
-    collected, idle, bottom_checked = {}, 0, not patient
+    collected, idle = {}, 0
     for _ in range(300 if collect_all else 1):
         if deadline is not None and time.monotonic() >= deadline:
             break
@@ -899,15 +900,14 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
         if len(collected) >= MAX_SCAN_ROWS:
             break
         if grew:
-            idle, bottom_checked = 0, not patient
+            idle = 0
         else:
             idle += 1
-        to_bottom = False
         if idle >= need_idle:
-            if bottom_checked:
-                break
-            # Last chance: jump to the very bottom, where a "load more" area may be waiting.
-            bottom_checked, to_bottom = True, True
+            break
+        # After one quiet window, jump to the very bottom: that is where a "load more" area
+        # triggers. If that window is quiet too, the feed has really ended.
+        to_bottom = patient and idle == 1
         try:
             known = page.evaluate(_OLD_MARKER_COUNT_JS)
             page.evaluate(_SCROLL_OLD_FEED_JS, [section_name, to_bottom])
@@ -1491,8 +1491,30 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 log(f"Responses: {responses}")
                 write_columns({"Responses": str(responses)})
 
-            # 1) New table. 2) Older cards by URL. 3) Marketplace home -> Selling link.
-            result = read_new_layout()
+            # 1) The layout this profile showed last time (skips a 15 s wait for a table it does not have).
+            # 2) New table. 3) Older cards by URL. 4) Marketplace home -> Selling link.
+            result, layout_used = None, ""
+            if layout_memory.recall(profile_label) == "old":
+                log("Using the older 'Your listings' layout (remembered for this profile)...")
+                try:
+                    page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                interruptible_sleep(0.5)
+                result = read_old_layout(2)
+                if result is not None:
+                    layout_used = "old"
+                else:
+                    log("The remembered layout did not load; checking the newer table...")
+                    try:
+                        page.goto(FB_SELLER_LISTINGS, wait_until="domcontentloaded", timeout=45000)
+                    except Exception:
+                        pass
+                    interruptible_sleep(random.uniform(1.0, 2.0))
+            if result is None:
+                result = read_new_layout()
+                if result is not None:
+                    layout_used = "new"
             if result is None:
                 log("New listings table not found. Using the older 'Your listings' layout...")
                 if page.url.split("?")[0].rstrip("/") != FB_MARKETPLACE_SELLING.rstrip("/"):
@@ -1502,10 +1524,18 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                         pass
                     interruptible_sleep(0.5)
                 result = read_old_layout(3)
+                if result is not None:
+                    layout_used = "old"
             if result is None and open_selling_from_marketplace_home(page, interruptible_sleep, log):
                 result = read_new_layout()
-                if result is None:
+                if result is not None:
+                    layout_used = "new"
+                else:
                     result = read_old_layout(1)
+                    if result is not None:
+                        layout_used = "old"
+            if layout_used and result not in (None, "empty"):
+                layout_memory.remember(profile_label, layout_used)
 
             if result == "empty":
                 # Zero the counts so an old scan's numbers do not look current.

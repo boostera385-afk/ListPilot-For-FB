@@ -234,8 +234,14 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                                 f"(saw: {lv.describe_results(cards)})")
                     if listing_id and state not in (lv.ERROR, lv.UNCLEAR):
                         result_cache[listing_id] = state
-                    if _blocked_reason(page):
-                        log(f"[{label} checker] account blocked mid-run; stopping this checker.")
+                    blocked = _blocked_reason(page)
+                    if blocked:
+                        sleep(3.0)  # a passing pop-up is not a block: look again before giving up
+                        blocked = _blocked_reason(page)
+                    if blocked:
+                        capture_diagnostics(page, f"checker_{label}", log)
+                        log(f"[{label} checker] account blocked mid-run ({blocked}); stopping this checker. "
+                            "Open the profile by hand to see what Facebook is asking for.")
                         results.extend([lv.ERROR] * (len(targets) - len(results)))
                         break
                 except AutomationStopped:

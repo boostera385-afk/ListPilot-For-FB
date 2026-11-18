@@ -103,3 +103,18 @@ The smaller reads were the top of the larger ones: the "Renew your listing?" car
 | 3 | A buyer search page that was slow to load gets one more try before the listing is called "not verified". |
 
 If the totals still move between runs after this, the account's listings really changed (new posts, expiries, deletions). Compare the `Listing Details` column of two runs.
+
+## 9. Fifth real run (`19 june id 7` alone, buyers on)
+
+Measured: owner scan 2m 09s (the full scan itself took 1m 14s), buyer pass 1m 05s, total 3m 14s.
+
+**Good news:** `19 june id 7` now reads **54 live + 5 rejected**. Earlier runs read only about 25 live. The 54 entries in `Listing Details` are distinct listings, so the lazy-loading fix is showing the real size of the account.
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | The PK buyer was stopped with "account blocked mid-run" and no reason, no screenshot. The second and third listings were left as Error. | A suspected block is checked again after 3 s (a passing pop-up is not a block). A confirmed block logs the reason (`LOGGED_OUT` or `CHECKPOINT`) and saves a screenshot to `debug/`. |
+| 2 | The Buyer checks tab showed "Not in search" for a listing whose PK check had failed, hiding that one buyer never looked. | Verdicts now say so: `Not in search (a buyer could not check)`, `Visible in search (a buyer could not check)`. The green colour is kept only for a fully checked result. |
+| 3 | About 55 s of the 2m 09s was not the scan: for this older-layout account the app waited about 15 s for a table it does not have. | Each profile's layout is remembered in `layout_memory.json` (local, not committed). The next run goes straight to the right page and falls back to the other layout if it does not load. |
+| 4 | The patient end-of-feed wait added about 12 s per profile. | After one quiet window the scan jumps to the bottom, where a loader triggers, and stops if that is quiet too (about 7 s). |
+
+Seeing a PK error again: open the PK profile by hand and look at the screenshot in `debug/`. If the account really is logged out or at a checkpoint, fix that first.

@@ -44,3 +44,28 @@ class DuplicateRowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayoutMemoryTests(unittest.TestCase):
+    def test_remember_and_recall_round_trip(self):
+        import os
+        import tempfile
+        from core.utils import layout_memory
+        path = os.path.join(tempfile.mkdtemp(), "memory.json")
+        self.assertEqual(layout_memory.recall("19 june id 7", path=path), "")
+        layout_memory.remember("19 june id 7", "old", path=path)
+        self.assertEqual(layout_memory.recall("  19 JUNE  id 7 ", path=path), "old")
+        layout_memory.remember("19 june id 7", "new", path=path)
+        self.assertEqual(layout_memory.recall("19 june id 7", path=path), "new")
+
+    def test_bad_values_and_missing_files_are_harmless(self):
+        import os
+        import tempfile
+        from core.utils import layout_memory
+        path = os.path.join(tempfile.mkdtemp(), "memory.json")
+        layout_memory.remember("", "old", path=path)
+        layout_memory.remember("x", "sideways", path=path)
+        self.assertFalse(os.path.exists(path))
+        with open(path, "w") as handle:
+            handle.write("not json")
+        self.assertEqual(layout_memory.recall("x", path=path), "")
