@@ -26,18 +26,28 @@ SECTIONS = (
             "action": ("Open Settings", "settings"),
         },
         {
+            "id": "newsheet", "title": "Create a new Google Sheet for testing",
+            "body": "Use a brand-new spreadsheet, not your listing-tracker sheet: go to sheets.new and name it "
+                    "'ListPilot Test'. Do not paste any listing data (titles, cities, zipcodes) into it.\n"
+                    "The Apps Script belongs to one spreadsheet, so this sheet gets its own script and its own URL.\n"
+                    "The next step creates the four ListPilot tabs for you.",
+        },
+        {
             "id": "script", "title": "Install the Google Sheets script",
             "body": "1. Open Script Builder and click Copy Code.\n"
-                    "2. In your Google Sheet: Extensions > Apps Script. Delete the old code and paste the new one.\n"
+                    "2. In the NEW sheet: Extensions > Apps Script. Delete the old code and paste the new one.\n"
                     "3. Pick setupSheets in the function list and click Run (authorise it the first time).\n"
                     "4. Deploy > Manage deployments > Edit > New version > Deploy.\n"
                     "    Execute as: Me.  Who has access: Anyone.\n"
-                    "5. Copy the Web app URL.",
+                    "5. Copy the Web app URL.\n"
+                    "After setupSheets, the sheet has the tabs: FB Listings, Dominancy Checker, Response Checker, "
+                    "Live Checker.",
             "action": ("Open Script Builder", "script"),
         },
         {
             "id": "url", "title": "Connect the Web App URL",
-            "body": "In Settings, paste the URL into 'Google Apps Script Web App URL' and save.",
+            "body": "In Settings, replace the 'Google Apps Script Web App URL' with the NEW sheet's URL and save. "
+                    "The app reads only the sheet behind this URL, so an old URL keeps reading the old sheet.",
             "action": ("Open Settings", "settings"), "auto": "script_url",
         },
         {
@@ -51,11 +61,15 @@ SECTIONS = (
     ("Part 2 - Prepare the sheet", [
         {
             "id": "rows", "title": "Add two test rows",
-            "body": "Open the 'Live Checker' tab of your Sheet. Add only two rows and leave Status empty "
-                    "(empty means 'to do'):\n"
-                    "  Row A - a profile you know is logged in and has listings.\n"
-                    "  Row B - the profile that previously showed nothing.\n"
-                    "Make sure both profiles are logged in to Facebook and not already open.",
+            "body": "Open the 'Live Checker' tab of the new sheet. Row 1 already has the headers; fill rows 2 and 3 only:\n"
+                    "  ID - the profile ID from Incogniton / AdsPower (or leave empty and use Profile Name).\n"
+                    "  Profile Name - the exact profile name in your browser.\n"
+                    "  Proxy - leave EMPTY. A filled Proxy overwrites the profile's own proxy before launch.\n"
+                    "  Status - leave EMPTY (empty means 'to do').\n"
+                    "  Row 2 (Row A): a profile you know is logged in and has listings.\n"
+                    "  Row 3 (Row B): the profile that previously showed nothing.\n"
+                    "Nothing else is needed: the other columns are filled in by the app. "
+                    "Both profiles must be logged in to Facebook and not already open.",
         },
     ]),
     ("Part 3 - Tests", [

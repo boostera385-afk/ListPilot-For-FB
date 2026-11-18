@@ -14,15 +14,24 @@ buttons that jump to the right page.
 - Set the **executable path** only if the app cannot find the browser.
 - For AdsPower, also paste the **API Key** (AdsPower > Settings > API).
 
+### Create a new Google Sheet for testing
+- Use a brand-new spreadsheet, **not** your listing-tracker sheet: go to `sheets.new` and name it `ListPilot Test`.
+- Do not paste any listing data (titles, cities, zipcodes) into it. ListPilot only needs profile rows.
+- The Apps Script belongs to one spreadsheet, so this sheet gets its own script and its own URL.
+- The next step creates the four ListPilot tabs for you.
+
 ### Install the Google Sheets script
 1. Open **Script Builder** and click **Copy Code** (same file as `core/assets/apps_script.js`).
-2. In your Google Sheet: **Extensions > Apps Script**. Delete the old code and paste the new one.
+2. In the **new** sheet: **Extensions > Apps Script**. Delete the old code and paste the new one.
 3. Pick `setupSheets` in the function list and click **Run** (authorise it the first time). This adds missing columns and never deletes data.
 4. **Deploy > Manage deployments > Edit > New version > Deploy**. Execute as **Me**, who has access **Anyone**.
 5. Copy the **Web app URL**.
 
+After `setupSheets` the sheet has the tabs `FB Listings`, `Dominancy Checker`, `Response Checker` and `Live Checker`.
+
 ### Connect the Web App URL
-- In **Settings**, paste the URL into **Google Apps Script Web App URL** and save.
+- In **Settings**, replace **Google Apps Script Web App URL** with the **new** sheet's URL and save.
+- The app reads only the sheet behind this URL, so an old URL keeps reading the old sheet.
 
 ### Set the PK and US checker accounts (optional)
 - In **Settings > Live Checker - Checker Profiles** choose one Pakistani profile and one US profile with a confirmed location.
@@ -31,13 +40,23 @@ buttons that jump to the right page.
 ## Part 2 - Prepare the sheet
 
 ### Add two test rows
-Open the **Live Checker** tab of your Sheet. It should have `ID`, `Profile Name`, `Proxy`, `Status`, `Responses`, `All Listings`, `Needs Attention`, `Total Listings`, `Live Count`, `Pending Count`, `Rejected Count`, `Other Count`, `Status Summary`, `Listing Details`, `Check Result`, `Last Checked` and the PK/US columns.
+Open the **Live Checker** tab of the new sheet. Row 1 already has the headers (`ID`, `Profile Name`, `Proxy`, `Status`, `All Listings`, `Needs Attention`, then the columns the app adds: `Responses`, `Total Listings`, `Live Count`, `Pending Count`, `Rejected Count`, `Other Count`, `Status Summary`, `Listing Details`, `Check Result`, `Last Checked` and the PK/US columns).
 
-Add only two rows and leave `Status` empty (empty means "to do"):
-- **Row A** - a profile you know is logged in and has listings.
-- **Row B** - the profile that previously showed nothing.
+Fill rows 2 and 3 only, columns A-D:
 
-Make sure both profiles are logged in to Facebook and not already open.
+| ID | Profile Name | Proxy | Status |
+|---|---|---|---|
+| profile ID from Incogniton / AdsPower | exact profile name | *(leave empty)* | *(leave empty)* |
+| profile ID from Incogniton / AdsPower | exact profile name | *(leave empty)* | *(leave empty)* |
+
+- **Row 2 (Row A)** - a profile you know is logged in and has listings.
+- **Row 3 (Row B)** - the profile that previously showed nothing.
+- **ID** can be left empty if `Profile Name` matches exactly.
+- **Proxy**: leave empty. A filled Proxy overwrites the profile's own proxy before launch.
+- **Status**: leave empty; empty means "to do".
+- Nothing else is needed. The other columns are filled in by the app.
+
+Both profiles must be logged in to Facebook and not already open.
 
 ## Part 3 - Tests
 
