@@ -187,7 +187,7 @@ class LiveCheckerView(ctk.CTkFrame):
             ("LIVE", "Live", theme.GREEN),
             ("PENDING", "Pending", theme.AMBER),
             ("REJECTED", "Rejected", theme.RED),
-            ("hidden", "Buyer notes", theme.PURPLE),
+            ("hidden", "Buyer: to review", theme.PURPLE),
         )
         self.stats = {}
         for index, (key, title, color) in enumerate(specs):
@@ -199,13 +199,16 @@ class LiveCheckerView(ctk.CTkFrame):
             row, text="Other: 0 (needs action: 0, unknown: 0)", font=theme.font(11),
             text_color=theme.TEXT_MUTED, anchor="w",
         )
-        self.other_summary.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.other_summary.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        # "Buyer: to review" counts PROFILES whose buyer result is not fully OK; this line says what was seen.
+        self.buyer_summary = ctk.CTkLabel(row, text="", font=theme.font(11), text_color=theme.TEXT_MUTED, anchor="w")
+        self.buyer_summary.grid(row=1, column=2, columnspan=3, sticky="w", pady=(4, 0))
         self.steps_toggle = ctk.CTkButton(
             row, text="Show stages", width=105, height=24, command=self._toggle_steps,
             fg_color=theme.NEUTRAL_BTN, hover_color=theme.NEUTRAL_BTN_HOVER,
             text_color=theme.TEXT, font=theme.font(11),
         )
-        self.steps_toggle.grid(row=1, column=4, columnspan=2, sticky="e", pady=(4, 0))
+        self.steps_toggle.grid(row=1, column=5, sticky="e", pady=(4, 0))
 
     def _build_progress(self):
         card = Card(self)
@@ -286,6 +289,7 @@ class LiveCheckerView(ctk.CTkFrame):
         self.log.clear()
         self.table.clear()
         self.buyer_table.clear()
+        self.buyer_summary.configure(text="")
         self.totals, self.done_count, self.visibility_issues = {}, 0, 0
         for card in self.stats.values():
             card.set(0)
@@ -424,6 +428,8 @@ class LiveCheckerView(ctk.CTkFrame):
             }, colors={"Visibility": theme.status_color(code)})
             self._show_buyer_rows(post)
         self.stats["hidden"].set(self.visibility_issues)
+        self.buyer_summary.configure(text=lv.summarize_buyer_rows(
+            [row for post in posts for row in post.get("_buyer_rows") or []]))
 
     def _show_buyer_rows(self, post):
         """List each sampled listing with what the PK and US buyers saw in Marketplace search."""

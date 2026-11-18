@@ -109,6 +109,7 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 - Results per listing: `SEARCH` (found in search by listing ID), `TEXT_MATCH` (found in search by title + price, no ID to confirm it), `NOT_FOUND` (searched, not in results, no ID to try the link), `LINK_ONLY` (opens by link but not in search near that account), `HIDDEN` (link says not available), `UNCLEAR`, `ERROR` (checker logged out / checkpoint / failed).
 - Columns written: `PK Check`, `US Check` (e.g. `3/4 in search, 1 link only`), `Visibility` (`OK`, `HIDDEN: n`, `NOT_IN_SEARCH: n`, `PARTIAL: ...`), `Visibility Details` (one line per listing), `Visibility Checked`.
 - Note: search is location based, so a Pakistani account will usually not find US-city listings in search; for it, `LINK_ONLY` is the expected "visible" result and `HIDDEN` is the real warning.
+- **"Buyer: to review" card** = the number of *profiles* whose buyer result is not fully OK (3 profiles with a not-in-search listing shows 3, however many listings were sampled). The line under the cards says what was seen: `Buyer sample: 9 listings checked - 1 visible in search - 8 not in search`.
 - **Buyer checks tab** in the app: one row per sampled listing with what the PK and US buyers saw (In search / Link opens, not in search / Not in search / Unavailable / Not verified) and a verdict (Visible in search, Visible to some buyers, Not in search, Hidden from a buyer).
 - Stop works during this step. Checker logged out / checkpoint saves a screenshot to `debug/`.
 

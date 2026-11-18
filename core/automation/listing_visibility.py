@@ -207,6 +207,31 @@ def listing_verdict(states):
     return "Not verified"
 
 
+def summarize_buyer_rows(rows):
+    """'Buyer sample: 9 listings checked - 1 visible in search - 8 not in search' (empty when nothing ran)."""
+    rows = list(rows or [])
+    if not rows:
+        return ""
+    counts = {"visible": 0, "some": 0, "not": 0, "hidden": 0, "unverified": 0}
+    for row in rows:
+        verdict = listing_verdict([row[label] for label in ("PK", "US") if label in row])
+        if verdict.startswith("Visible in search") or verdict.startswith("Visible (title"):
+            counts["visible"] += 1
+        elif verdict == "Visible to some buyers":
+            counts["some"] += 1
+        elif verdict.startswith("Hidden"):
+            counts["hidden"] += 1
+        elif verdict == "Not in search":
+            counts["not"] += 1
+        else:
+            counts["unverified"] += 1
+    words = (("visible", "visible in search"), ("some", "visible to some buyers"), ("not", "not in search"),
+             ("hidden", "hidden"), ("unverified", "not verified"))
+    parts = [f"{len(rows)} listing{'s' if len(rows) != 1 else ''} checked"]
+    parts += [f"{counts[key]} {word}" for key, word in words if counts[key]]
+    return "Buyer sample: " + " · ".join(parts)
+
+
 def classify_item_page(url, body_text, title):
     """SEARCH-fallback result for the listing's own page: LINK_ONLY, HIDDEN or UNCLEAR."""
     lowered = _clean(body_text).lower()

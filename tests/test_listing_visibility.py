@@ -168,3 +168,24 @@ class SampleDiversityTests(unittest.TestCase):
         targets, _ = lv.visibility_targets(listings, limit=2)
         self.assertEqual(targets[0]["listingId"], "9")
         self.assertEqual(targets[1]["title"], "A")
+
+
+class BuyerSummaryTests(unittest.TestCase):
+    def test_summary_counts_listings_by_verdict(self):
+        rows = [
+            {"PK": lv.SEARCH, "US": lv.SEARCH},
+            {"PK": lv.TEXT_MATCH, "US": lv.NOT_FOUND},
+            {"PK": lv.LINK_ONLY, "US": lv.NOT_FOUND},
+            {"PK": lv.NOT_FOUND, "US": lv.NOT_FOUND},
+            {"PK": lv.UNCLEAR, "US": lv.UNCLEAR},
+            {"PK": lv.SEARCH, "US": lv.HIDDEN},
+        ]
+        text = lv.summarize_buyer_rows(rows)
+        self.assertTrue(text.startswith("Buyer sample: 6 listings checked"))
+        for part in ("1 visible in search", "1 visible to some buyers", "2 not in search", "1 hidden", "1 not verified"):
+            self.assertIn(part, text)
+
+    def test_summary_is_empty_when_nothing_ran_and_singular_for_one(self):
+        self.assertEqual(lv.summarize_buyer_rows([]), "")
+        self.assertEqual(lv.summarize_buyer_rows(None), "")
+        self.assertIn("1 listing checked", lv.summarize_buyer_rows([{"PK": lv.SEARCH}]))
