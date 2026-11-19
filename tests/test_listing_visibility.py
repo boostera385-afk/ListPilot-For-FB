@@ -182,7 +182,7 @@ class BuyerSummaryTests(unittest.TestCase):
         ]
         text = lv.summarize_buyer_rows(rows)
         self.assertTrue(text.startswith("Buyer sample: 6 listings checked"))
-        for part in ("1 visible in search", "1 visible to some buyers", "2 not in search", "1 hidden", "1 not verified"):
+        for part in ("1 found by at least one buyer", "1 visible to some buyers", "2 not in search", "1 hidden", "1 not verified"):
             self.assertIn(part, text)
 
     def test_summary_is_empty_when_nothing_ran_and_singular_for_one(self):
@@ -202,5 +202,77 @@ class UncheckedBuyerVerdictTests(unittest.TestCase):
     def test_summary_still_counts_them_by_what_was_seen(self):
         rows = [{"PK": lv.ERROR, "US": lv.NOT_FOUND}, {"PK": lv.ERROR, "US": lv.SEARCH}]
         text = lv.summarize_buyer_rows(rows)
-        self.assertIn("1 visible in search", text)
+        self.assertIn("1 found by at least one buyer", text)
         self.assertIn("1 not in search", text)
+
+    def test_login_failures_and_title_matches_are_explicit_in_summary(self):
+        text = lv.summarize_buyer_rows([{"PK": lv.LOGIN_REQUIRED, "US": lv.TEXT_MATCH}])
+        self.assertIn("1 with incomplete buyer checks", text)
+        self.assertIn("identity unverified", text)
+        self.assertTrue(lv.overall_visibility({"PK": [lv.LOGIN_REQUIRED]}).startswith("PARTIAL"))
+
+
+class OwnerBuyerColumnsTests(unittest.TestCase):
+    def test_enabled_buyers_are_not_off_when_seller_failed(self):
+        values = lv.owner_buyer_columns(lv.BuyerOptions(pk_profile="pk", us_profile="us"), owner_failed=True)
+        self.assertEqual(values["Visibility"], "NOT_CHECKED")
+        self.assertIn("seller scan failed", values["PK Check"])
+        self.assertIn("seller scan failed", values["US Check"])
+        self.assertEqual(values["PK vs US"], "Incomplete: seller scan failed")
+
+    def test_off_only_applies_to_disabled_or_unconfigured_buyer(self):
+        values = lv.owner_buyer_columns(lv.BuyerOptions(pk_profile="pk", us_enabled=False))
+        self.assertEqual(values["US Check"], "Off")
+        self.assertIn("no live listings", values["PK Check"])
+        self.assertEqual(lv.owner_buyer_columns(lv.BuyerOptions(pk_profile="pk"), True)["PK Check"], "Waiting")
+
+
+class RegionComparisonTests(unittest.TestCase):
+    def test_identical_per_listing_outcomes_are_same_even_when_both_miss(self):
+        results = [lv.SEARCH, lv.NOT_FOUND, lv.LINK_ONLY, lv.HIDDEN]
+        self.assertEqual(lv.compare_regions({"PK": results, "US": results}), "Same: 4/4 sampled listings")
+
+    def test_equal_totals_can_have_different_listings(self):
+        results = {"PK": [lv.SEARCH, lv.NOT_FOUND], "US": [lv.NOT_FOUND, lv.SEARCH]}
+        self.assertEqual(lv.compare_regions(results), "Different: 2/2 sampled listings; 0 same")
+
+    def test_counts_same_and_different_positions(self):
+        results = {"PK": [lv.SEARCH, lv.LINK_ONLY, lv.HIDDEN], "US": [lv.SEARCH, lv.SEARCH, lv.HIDDEN]}
+        self.assertEqual(lv.compare_regions(results), "Different: 1/3 sampled listings; 2 same")
+
+    def test_errors_are_incomplete_not_regional_differences(self):
+        for state in lv.UNVERIFIED_STATES:
+            with self.subTest(state=state):
+                results = {"PK": [state, lv.SEARCH], "US": [state, lv.NOT_FOUND]}
+                self.assertEqual(lv.compare_regions(results), "Incomplete: 1/2 unverified; 0 same, 1 different")
+
+    def test_missing_and_unknown_results_are_incomplete(self):
+        for results in ({"PK": [lv.SEARCH], "US": []},
+                        {"PK": ["new-status"], "US": [lv.SEARCH]}):
+            self.assertTrue(lv.compare_regions(results, expected=2).startswith("Incomplete: 2/2"))
+        self.assertEqual(lv.compare_regions({"PK": [lv.SEARCH], "US": []}, expected=0),
+                         "Incomplete: buyer sample sizes differ")
+
+    def test_disabled_region_is_not_compared(self):
+        self.assertTrue(lv.compare_regions({"US": [lv.SEARCH]}).startswith("Not compared:"))
+        values = lv.row_columns([{"title": "A"}], {"US": [lv.SEARCH]}, disabled={"PK"})
+        self.assertTrue(values["PK vs US"].startswith("Not compared:"))
+
+    def test_empty_samples_are_not_compared(self):
+        self.assertEqual(lv.compare_regions({"PK": [], "US": []}), "Not compared: no sampled listings")
+
+    def test_text_matches_compare_search_outcomes_but_keep_identity_warning(self):
+        result = lv.compare_regions({"PK": [lv.SEARCH], "US": [lv.TEXT_MATCH]})
+        self.assertTrue(result.startswith("Same: 1/1"))
+        self.assertIn("identity unverified", result)
+
+    def test_row_columns_write_comparison_and_scope(self):
+        values = lv.row_columns([{"title": "A"}], {"PK": [lv.SEARCH], "US": [lv.LINK_ONLY]})
+        self.assertEqual(values["PK vs US"], "Different: 1/1 sampled listings; 0 same")
+        self.assertIn("PK vs US: Different:", values["Visibility Details"])
+
+    def test_owner_run_clears_old_comparison_until_both_buyers_finish(self):
+        options = lv.BuyerOptions(pk_profile="pk", us_profile="us")
+        self.assertEqual(lv.owner_buyer_columns(options, has_live=True)["PK vs US"], "Waiting")
+        self.assertEqual(lv.owner_buyer_columns(options)["PK vs US"], "Not compared: no live listings")
+        self.assertTrue(lv.owner_buyer_columns(lv.BuyerOptions(enabled=False))["PK vs US"].startswith("Not compared:"))

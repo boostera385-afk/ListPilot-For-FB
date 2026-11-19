@@ -67,8 +67,12 @@ class GroupedProfileWorker:
             # Start Profile
             self.update_state(AutomationState.PROFILE_STARTING)
             from gui.ui_helpers import resolve_duplicates_ui
-            started, data = start_profile(self.profile_id, duplicate_resolver=resolve_duplicates_ui, master=self.master_ui_context, logger_callback=self.log)
+            started, data = start_profile(self.profile_id, duplicate_resolver=resolve_duplicates_ui,
+                                         master=self.master_ui_context, logger_callback=self.log,
+                                         stop_event=self._stop_event)
             if not started:
+                if str(data).startswith(("PROFILE_ALREADY_OPEN:", "PROFILE_LAUNCH_PENDING:")):
+                    raise PermanentError(str(data))
                 raise RetryableError(f"Failed to start profile: {data}")
 
             self._check_stop()
@@ -92,6 +96,38 @@ class GroupedProfileWorker:
         except Exception as e:
             self.log(f"Failed to start profile for group: {e}")
             for p in self.posts:
+                if isinstance(e, AutomationStopped):
+                    if self.task_type == "Live Checker":
+                        p["_live_check"] = "STOPPED"
+                    self.completion_callback(p, False)
+                    continue  # unclaimed rows remain pending when stopped
+                if self.task_type == "Live Checker":
+                    p["_live_check"] = "PROFILE_START_FAILED"
+                    p["_live_error"] = str(e)
+                    # Launch failures happened before claiming a row. Save diagnostics
+                    # only if we can claim it, never overwrite another worker's result.
+                    try:
+                        claimed, _ = claim_row(self.task_type, p.get("rowNumber"))
+                        if claimed:
+                            from core.automation import listing_status as ls, listing_visibility as lv
+                            from core.services.sheets_service import update_column_values
+                            from core.config import load_config
+                            options = p.get("_buyer_options") or lv.BuyerOptions.from_settings(load_config())
+                            values = {
+                                "Check Result": f"PROFILE_START_FAILED: {_clean_failure_message(e)}",
+                                "Last Checked": ls.timestamp(), "Scan Time": "",
+                                **{column: "" for column in (
+                                    "Total Listings", "Live Count", "Pending Count", "Rejected Count",
+                                    "Other Count", "Duplicate Count", "Duplicate Details", "Status Summary",
+                                    "Listing Details", "All Listings", "Needs Attention")},
+                                **lv.owner_buyer_columns(options, owner_failed=True),
+                            }
+                            saved, message = update_column_values(self.task_type, p["rowNumber"], values)
+                            if not saved:
+                                self.log(f"Could not save launch diagnostics: {message}")
+                            update_row_status(self.task_type, p["rowNumber"], f"Failed: {_clean_failure_message(e)}")
+                    except Exception as save_error:
+                        self.log(f"Could not save launch failure: {save_error}")
                 self.completion_callback(p, False)
             return
 

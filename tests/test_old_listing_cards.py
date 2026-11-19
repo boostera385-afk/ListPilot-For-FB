@@ -130,6 +130,31 @@ class OldCardBrowserTests(unittest.TestCase):
         scan = ls.build_scan_result(*lc.read_all_listings_old_ui(self.page, self.sleep))
         self.assertIn("read 1 of 12", "; ".join(scan["notes"]))
 
+    def test_nested_scroll_panel_loads_all_cards(self):
+        markup = [card(f"Nested {i}", "$50") for i in range(12)]
+        self.render("<style>body{overflow:hidden}</style><h1>Your listings</h1>"
+                    "<div id='panel' style='height:450px;overflow-y:auto'><div id='feed'></div></div>")
+        self.page.evaluate("""(cards) => {
+            let loaded = 0;
+            const feed = document.querySelector('#feed'), panel = document.querySelector('#panel');
+            function load() {
+                for (let end = Math.min(cards.length, loaded + 5); loaded < end; loaded++)
+                    feed.insertAdjacentHTML('beforeend', cards[loaded]);
+            }
+            load();
+            panel.addEventListener('scroll', () => {
+                if (panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 300) load();
+            });
+        }""", markup)
+        cards = lc.read_old_section(self.page, lc.SECTION_ALL_LISTINGS, self.sleep, collect_all=True)
+        self.assertEqual(len(cards), 12)
+
+    def test_identical_cards_are_not_merged_into_one_listing(self):
+        self.render("<h1>Your listings</h1>" + card("Furniture", "$34") * 3)
+        scan = ls.build_scan_result(*lc.read_all_listings_old_ui(self.page, self.sleep))
+        self.assertEqual(scan["total"], 3)
+        self.assertEqual(scan["duplicates"], 0)  # repetition alone is not a Facebook duplicate rejection
+
 
 if __name__ == "__main__":
     unittest.main()

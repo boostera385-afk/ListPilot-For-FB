@@ -37,6 +37,7 @@ STATUS_ORDER = (LIVE, PENDING, REJECTED, ACTION_REQUIRED, REMOVED, EXPIRED, SOLD
 # Rejection and review wording is checked before "active" so a row such as
 # "Active - Pending review" is not counted as live.
 _RULES = (
+    (REJECTED, r"looks like a duplicate|duplicate.{0,50}(?:didn.t|did not|not).{0,10}post"),
     (REJECTED, r"reject|against our|goes against|breaking our|violat|declined|not approved"),
     (ACTION_REQUIRED, r"confirm your identity|verify your identity|identity verification|identity confirmation"),
     (REJECTED, r"needs? attention"),
@@ -101,6 +102,7 @@ def dedupe_listings(listings):
     status, so two real listings with the same title are kept apart by ID.
     """
     seen = set()
+    card_slots = {}
     unique = []
     for item in listings or []:
         item = item or {}
@@ -117,9 +119,17 @@ def dedupe_listings(listings):
                 _clean(item.get("listed")),
                 item.get("clicksCount"),
                 # New-table rows are unique per tab + position; older cards have none.
-                (item.get("tab"), item.get("index")) if item.get("index") else None,
+                (item.get("tab"), item.get("index")) if item.get("index") not in (None, "") else None,
             )
         )
+        if not listing_id and item.get("cardId"):
+            # DOM identity keeps separate, genuinely identical older cards.
+            # The nth identical card on another section is still the same listing.
+            slots = card_slots.setdefault((key, item.get("tab")), {})
+            card_id = item["cardId"]
+            if card_id not in slots:
+                slots[card_id] = len(slots)
+            key += (slots[card_id],)
         if key in seen:
             continue
         seen.add(key)
@@ -163,6 +173,8 @@ def build_scan_result(listings, tab_counts=None, notes=None):
     rows than the tab badge claims); the caller reports it as PARTIAL.
     """
     unique = dedupe_listings(listings)
+    duplicates = [item for item in unique if item.get("state") == REJECTED and
+                  re.search(r"\bduplicate\b", str(item.get("reason") or ""), re.IGNORECASE)]
     counts = count_statuses(unique)
     notes = list(notes or [])
     unknown = counts.get(UNKNOWN, 0)
@@ -173,6 +185,8 @@ def build_scan_result(listings, tab_counts=None, notes=None):
     return {
         "notes": notes,
         "other": other_count(counts),
+        "duplicates": len(duplicates),  # subset of REJECTED, never added to Total
+        "duplicateDetails": format_listing_details(duplicates),
         "total": len(unique),
         "counts": counts,
         "headline": format_counts(counts),

@@ -61,8 +61,12 @@ def wait_for_ready(timeout=60, logger_callback=print):
     return _incogniton.wait_for_incogniton_ready(timeout=timeout, logger_callback=logger_callback)
 
 
-def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=3, logger_callback=None):
-    return _mgr().start_profile(identifier, duplicate_resolver=duplicate_resolver, master=master, max_retries=max_retries, logger_callback=logger_callback)
+def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=3, logger_callback=None, stop_event=None):
+    kwargs = dict(duplicate_resolver=duplicate_resolver, master=master, max_retries=max_retries,
+                  logger_callback=logger_callback)
+    if get_provider() == INCOGNITON:
+        kwargs["stop_event"] = stop_event
+    return _mgr().start_profile(identifier, **kwargs)
 
 
 def stop_profile(identifier):

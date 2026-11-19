@@ -73,6 +73,7 @@ Written to the **Live Checker** sheet (created automatically if missing):
 | `All Listings` / `Needs Attention` | First listing of each tab (older v1 summary, kept) |
 | `Total Listings`, `Live Count`, `Pending Count`, `Rejected Count`, `Other Count` | Full-scan counts. `Other Count` = removed, expired, sold, draft and unknown, so Total = Live + Pending + Rejected + Other |
 | `Status Summary` | e.g. `3 LIVE, 1 PENDING, 2 SOLD` |
+| `Duplicate Count` / `Duplicate Details` | Facebook-marked duplicate rejections only. A subset of Rejected, never added to Total. Same title/price alone is not proof of duplication; distinct listings are retained. |
 | `Listing Details` | One line per listing: `LIVE \| Title \| 3 clicks \| 1 msg \| ID 123` (first 40) |
 | `Check Result` | Code from section 4 |
 | `Last Checked` | `YYYY-MM-DD HH:MM` |
@@ -108,10 +109,20 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 - A profile named twice in the queue is checked once; the later row gets `Skipped: same profile as row N`.
 - Results per listing: `SEARCH` (found in search by listing ID), `TEXT_MATCH` (found in search by title + price, no ID to confirm it), `NOT_FOUND` (searched, not in results, no ID to try the link), `LINK_ONLY` (opens by link but not in search near that account), `HIDDEN` (link says not available), `UNCLEAR`, `ERROR` (checker logged out / checkpoint / failed).
 - Columns written: `PK Check`, `US Check` (e.g. `3/4 in search, 1 link only`), `Visibility` (`OK`, `HIDDEN: n`, `NOT_IN_SEARCH: n`, `PARTIAL: ...`), `Visibility Details` (one line per listing), `Visibility Checked`.
+- `PK vs US` is inserted immediately after `US Check` by `setupSheets` without clearing existing rows. It compares the same sampled listings: **Same** (matching outcomes, even if both missed), **Different** (some outcomes differ), **Incomplete** (missing results, login/network errors), or **Not compared** (one buyer disabled/no sample). Counts say how many listings agree/differ. Title+price hits retain an identity-unverified warning. Existing rows populate on the next check, not during setup.
 - Note: search is location based, so a Pakistani account will usually not find US-city listings in search; for it, `LINK_ONLY` is the expected "visible" result and `HIDDEN` is the real warning.
 - **"Buyer: to review" card** = the number of *profiles* whose buyer result is not fully OK (3 profiles with a not-in-search listing shows 3, however many listings were sampled). The line under the cards says what was seen: `Buyer sample: 9 listings checked - 1 visible in search - 8 not in search`.
 - **Buyer checks tab** in the app: one row per sampled listing with what the PK and US buyers saw (In search / Link opens, not in search / Not in search / Unavailable / Not verified) and a verdict (Visible in search, Visible to some buyers, Not in search, Hidden from a buyer).
 - Stop works during this step. Checker logged out / checkpoint saves a screenshot to `debug/`.
+
+### Interrupted runs and duplicate best practices
+
+- `Off` means the buyer is disabled/unconfigured. An enabled buyer with a failed seller scan shows `Not checked: seller scan failed`, not Off.
+- Buyer results distinguish `LOGIN_REQUIRED`, `CHECKPOINT` and `NETWORK_ERROR`. A login prompt does not prove an account ban or a hidden listing. Completed results survive a later interruption.
+- Brief navigation failures get one bounded retry. Keep Wi-Fi/proxy stable during a run; after a persistent sign-in prompt, open that checker manually, sign in, then re-check. The app never submits credentials or dismisses an identity checkpoint.
+- Incogniton startup is serialized, but scans remain concurrent. A single launch request runs in the background while ListPilot watches for that exact profile's local DevTools port (verified by `/json/version`). A browser that opens before the API replies is reused immediately, without stopping or relaunching it. Monitoring is bounded to 60 seconds and responds to Stop. An unresolved request is reported as `PROFILE_LAUNCH_PENDING`, not automatically replayed; check proxy/sync status and close the unfinished profile before re-checking. Manually opened profiles are never taken over.
+- Keep one seller row per exact profile ID and keep PK/US checker profiles out of the seller queue. Do not delete/repost listings automatically just because titles repeat. Review Facebook's duplicate notice and listing IDs first.
+- Update `core/assets/apps_script.js` in Apps Script, run `setupSheets`, then deploy a new version for the new duplicate columns. Existing rows are not retroactively rewritten; re-check to refresh them.
 
 ## 6b. Time counts and findings
 

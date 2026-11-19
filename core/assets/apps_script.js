@@ -40,10 +40,11 @@ function setCellSafely_(range, value) {
 // "Responses" = messages on the just-published listing (from the live check).
 // "All Listings" / "Needs Attention" = the first listing of each tab.
 const AUTO_COLUMNS = {};
-const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count", "Status Summary", "Listing Details", "Check Result", "Last Checked", "Scan Time"];
+// Duplicate Count is a subset of Rejected Count, not an additional listing state.
+const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count", "Status Summary", "Listing Details", "Check Result", "Last Checked", "Scan Time", "Duplicate Count", "Duplicate Details"];
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
 // Buyer-side check from the Pakistani and USA checker accounts.
-const VISIBILITY_COLUMNS = ["PK Check", "US Check", "Visibility", "Visibility Details", "Visibility Checked"];
+const VISIBILITY_COLUMNS = ["PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked"];
 AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS);
 AUTO_COLUMNS[SHEET_RESPONSE_CHECKER] = ["Responses"];
 
@@ -132,7 +133,8 @@ function findExact_(values, name) {
   return values.findIndex(v => String(v == null ? "" : v).trim().toLowerCase().replace(/\s+/g, " ") === target);
 }
 
-// 1-based column for app-owned `name`, creating it at the end when missing.
+// 1-based column for app-owned `name`, creating it when missing.
+// New region comparison goes after US Check; existing data shifts intact.
 function ensureColumn_(sheet, name) {
   let idx = findExact_(getHeaders_(sheet), name);
   if (idx !== -1) return idx + 1;
@@ -142,7 +144,12 @@ function ensureColumn_(sheet, name) {
   try {
     idx = findExact_(getHeaders_(sheet), name);
     if (idx !== -1) return idx + 1;
-    const column = sheet.getLastColumn() + 1;
+    let column = sheet.getLastColumn() + 1;
+    const usIndex = findExact_(getHeaders_(sheet), "US Check");
+    if (name === "PK vs US" && canonicalSheetName_(sheet) === SHEET_LIVE_CHECKER && usIndex !== -1) {
+      sheet.insertColumnAfter(usIndex + 1);
+      column = usIndex + 2;
+    }
     sheet.getRange(1, column).setValue(name).setFontWeight("bold");
     // New columns match the existing header look instead of appearing plain.
     if (column > 1) sheet.getRange(1, column - 1).copyFormatToRange(sheet, column, column, 1, 1);
@@ -249,7 +256,8 @@ function formatListPilotSheet_(sheet) {
     visibility: "Buyer sample result, not a global visibility verdict. NOT_IN_SEARCH means the link opened but the sampled search did not find it.",
     visibilitydetail: "Sample scope and per-listing results. Exact Facebook listing IDs are required for verified search matches. Expand this row to read the full details.",
     pkcheck: "PK buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location.",
-    uscheck: "US buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location."
+    uscheck: "US buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location.",
+    pkvsu: "Compares PK and US outcomes for each sampled listing, not just totals. Same may mean both buyers missed it. Different means observed outcomes differ. Incomplete means results are missing/unread or a buyer needs login/network recovery. Not compared means both buyers did not run. Title+price matches do not verify listing identity. Re-check profiles to populate this new column."
   };
   const numeric = new Set(["responses", "response", "totallisting", "livecount", "pendingcount", "rejectedcount", "othercount", "total", "live", "pending", "rejected"]);
   const statusColumns = new Set(["status", "checkresult", "visibility", "pkcheck", "uscheck"]);
@@ -290,7 +298,7 @@ function formatListPilotSheet_(sheet) {
       sheet.setColumnWidth(column, 380);
     } else if (key === "status" || key === "checkresult") {
       sheet.setColumnWidth(column, 300);
-    } else if (key === "visibility" || key === "pkcheck" || key === "uscheck") {
+    } else if (key === "visibility" || key === "pkcheck" || key === "uscheck" || key === "pkvsu") {
       sheet.setColumnWidth(column, 240);
     } else if (key === "scantime") {
       sheet.setColumnWidth(column, 110);
@@ -298,6 +306,11 @@ function formatListPilotSheet_(sheet) {
     } else if (key === "lastchecked" || key === "visibilitychecked" || key === "time") {
       sheet.setColumnWidth(column, 185);
       if (key === "time") range.setNumberFormat("yyyy-mm-dd hh:mm");
+    }
+    if (key === "pkvsu") {
+      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(different|incomplete|waiting)|title\\+price")', "#FFF3D6", "#825500");
+      rule(range, key + ":off", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^not compared")', "#EDF0F5", "#596579");
+      rule(range, key + ":same", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^same:")', "#E7F5ED", "#175A36");
     }
     if (statusColumns.has(key)) {
       rule(range, key + ":error", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^failed|logged_out|checkpoint|layout_unknown|no_marketplace|timeout|hidden|error|unavailable")', "#FDEBEC", "#A32632");

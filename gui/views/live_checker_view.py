@@ -40,8 +40,8 @@ MODE_HELP = {
 BUYER_COLUMNS = ("Profile", "Listing", "Price", "PK", "US", "Verdict")
 BUYER_WEIGHTS = (3, 5, 2, 3, 3, 4)
 
-RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Other", "Total", "PK", "US", "Visibility")
-RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 3, 3, 3)
+RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Duplicates", "Other", "Total", "PK", "US", "Visibility")
+RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 2, 3, 3, 3)
 
 
 def _parse_concurrency(value, default=3):
@@ -76,6 +76,7 @@ class LiveCheckerView(ctk.CTkFrame):
         self.done_count = 0
         self.totals = {}
         self.visibility_issues = 0
+        self.owner_issues = 0
         self.run_options = buyer_options()
         self._started_at = 0
         self._phase = "Ready"
@@ -197,11 +198,12 @@ class LiveCheckerView(ctk.CTkFrame):
             self.stats[key] = card
         self.other_summary = ctk.CTkLabel(
             row, text="Other: 0 (needs action: 0, unknown: 0)", font=theme.font(11),
-            text_color=theme.TEXT_MUTED, anchor="w",
+            text_color=theme.TEXT_MUTED, anchor="w", justify="left", wraplength=400,
         )
         self.other_summary.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         # "Buyer: to review" counts PROFILES whose buyer result is not fully OK; this line says what was seen.
-        self.buyer_summary = ctk.CTkLabel(row, text="", font=theme.font(11), text_color=theme.TEXT_MUTED, anchor="w")
+        self.buyer_summary = ctk.CTkLabel(row, text="", font=theme.font(11), text_color=theme.TEXT_MUTED,
+                                         anchor="w", justify="left", wraplength=600)
         self.buyer_summary.grid(row=1, column=2, columnspan=3, sticky="w", pady=(4, 0))
         self.steps_toggle = ctk.CTkButton(
             row, text="Show stages", width=105, height=24, command=self._toggle_steps,
@@ -240,10 +242,11 @@ class LiveCheckerView(ctk.CTkFrame):
             tab.grid_rowconfigure(0, weight=1)
         self.table = ResultsTable(
             self.tabs.tab("Results"), RESULT_COLUMNS, RESULT_WEIGHTS, min_width=940,
-            wraplengths=(120, 85, 35, 45, 50, 40, 40, 80, 80, 85),
+            wraplengths=(120, 85, 35, 45, 50, 60, 40, 40, 100, 100, 85),
             display_formatters={"Visibility": lv.visibility_label, "Result": lambda code: {
                 "OK": "Scanned", "PARTIAL": "Partial scan", "CHECKPOINT": "Account check",
                 "LAYOUT_UNKNOWN": "Layout unread", "LOGGED_OUT": "Login needed",
+                "PROFILE_START_FAILED": "Launch failed",
             }.get(str(code), str(code))},
         )
         self.table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
@@ -291,6 +294,8 @@ class LiveCheckerView(ctk.CTkFrame):
         self.buyer_table.clear()
         self.buyer_summary.configure(text="")
         self.totals, self.done_count, self.visibility_issues = {}, 0, 0
+        self.owner_issues = 0
+        self._duplicate_total = 0
         for card in self.stats.values():
             card.set(0)
         self.other_summary.configure(text="Other: 0 (needs action: 0, unknown: 0)", text_color=theme.TEXT_MUTED)
@@ -354,7 +359,7 @@ class LiveCheckerView(ctk.CTkFrame):
                 self._set_buttons(True, False, False)
                 self.concurrency.set_enabled(True)
                 self._set_status("Finished" if self.done_count else "Idle",
-                                 theme.AMBER if self.visibility_issues else theme.GREEN if self.done_count else theme.GRAY, False)
+                                 theme.AMBER if self.visibility_issues or self.owner_issues else theme.GREEN if self.done_count else theme.GRAY, False)
                 if self.done_count:
                     self._phase = "Finished"
                     self._set_steps_visible(False)
@@ -386,27 +391,32 @@ class LiveCheckerView(ctk.CTkFrame):
         for state, count in counts.items():
             self.totals[state] = self.totals.get(state, 0) + count
         code = post.get("_live_check") or ("OK" if success else "FAILED")
+        if code != "OK":
+            self.owner_issues += 1
         verified = "_live_counts" in post or code == "NO_LISTINGS"
+        buyers = lv.owner_buyer_columns(self.run_options, bool(counts.get("LIVE")),
+                                       owner_failed=not verified)
         self.table.upsert(post.get("rowNumber") or _profile_name(post), {
             "Profile": _profile_name(post),
             "Result": code.split(":")[0],
             "Live": counts.get("LIVE", 0) if verified else "—",
             "Pending": counts.get("PENDING", 0) if verified else "—",
             "Rejected": counts.get("REJECTED", 0) if verified else "—",
+            "Duplicates": post.get("_live_duplicates", 0) if verified else "—",
             "Other": other_count(counts) if verified else "—",
             "Total": sum(counts.values()) if verified else "—",
-            "PK": "Waiting" if counts.get("LIVE") and "PK" in dict(self.run_options.checkers) else "Off",
-            "US": "Waiting" if counts.get("LIVE") and "US" in dict(self.run_options.checkers) else "Off",
-            "Visibility": "PENDING" if counts.get("LIVE") and self.run_options.checkers else "SKIPPED",
+            "PK": buyers["PK Check"], "US": buyers["US Check"], "Visibility": buyers["Visibility"],
         }, colors={"Result": theme.status_color(code), "Live": theme.GREEN,
                    "Pending": theme.AMBER, "Rejected": theme.RED, "Other": theme.AMBER})
         self.stats["profiles"].set(self.done_count)
         self.stats["total"].set(sum(self.totals.values()))
         for state in ("LIVE", "PENDING", "REJECTED"):
             self.stats[state].set(self.totals.get(state, 0))
+        self._duplicate_total = getattr(self, "_duplicate_total", 0) + post.get("_live_duplicates", 0)
         action, unknown = self.totals.get("ACTION_REQUIRED", 0), self.totals.get("UNKNOWN", 0)
         self.other_summary.configure(
-            text=f"Other: {other_count(self.totals)} (needs action: {action}, unknown: {unknown})",
+            text=f"Other: {other_count(self.totals)} (needs action: {action}, unknown: {unknown})"
+                 f" · Duplicates: {self._duplicate_total} (in Rejected)",
             text_color=theme.AMBER if action or unknown else theme.TEXT_MUTED,
         )
         self.step1.update_progress(self.done_count, self.total_count, " profiles")
@@ -585,7 +595,7 @@ class LiveCheckerView(ctk.CTkFrame):
                     self.success_count += 1
                 for state, count in (post.get("_live_counts") or {}).items():
                     totals[state] = totals.get(state, 0) + count
-                code = post.get("_live_check")
+                code = post.get("_live_check") or ("OK" if success else "FAILED")
                 if code and code != "OK":
                     issues[code] = issues.get(code, 0) + 1
             run_on_ui(self._on_profile_done, post, success)

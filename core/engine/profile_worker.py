@@ -85,8 +85,10 @@ class ProfileWorker:
             self.completion_callback(self.post, False)
             return
         self.update_state(AutomationState.CLAIMED)
+        profile_started = False
 
         def _single_attempt():
+            nonlocal profile_started
             self._check_stop()
 
             # Proxy Update
@@ -103,11 +105,16 @@ class ProfileWorker:
             # Start Profile
             self.update_state(AutomationState.PROFILE_STARTING)
             from gui.ui_helpers import resolve_duplicates_ui
-            started, data = start_profile(profile_id, duplicate_resolver=resolve_duplicates_ui, master=self.master_ui_context, logger_callback=self.log)
+            started, data = start_profile(profile_id, duplicate_resolver=resolve_duplicates_ui,
+                                         master=self.master_ui_context, logger_callback=self.log,
+                                         stop_event=self._stop_event)
             
             if not started:
+                if str(data).startswith(("PROFILE_ALREADY_OPEN:", "PROFILE_LAUNCH_PENDING:")):
+                    raise PermanentError(str(data))
                 raise RetryableError(f"Failed to start profile: {data}")
 
+            profile_started = True
             self._check_stop()
 
             # Extract CDP
@@ -174,11 +181,13 @@ class ProfileWorker:
         finally:
             if self.post.get("_force_keep_open"):
                 self.log("Keeping profile open because unread responses were found.")
-            else:
+            elif profile_started:
                 self.log("Stopping profile...")
                 if not stop_profile(profile_id):
                     self.log("Warning: the browser provider did not confirm that the profile stopped.")
                 self._stop_event.wait(3)
+            else:
+                self.log("No automation-owned browser to stop.")
             self.completion_callback(self.post, final_status)
 
 

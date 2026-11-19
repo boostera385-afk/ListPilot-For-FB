@@ -827,12 +827,20 @@ _SCROLL_OLD_FEED_JS = r"""
   const cards = Array.from(document.querySelectorAll('[data-lp-card]'))
       .filter(n => (n.getAttribute('data-lp-card') || '').startsWith(section + '-'));
   const last = cards[cards.length - 1];
-  const before = window.scrollY;
-  if (toBottom) { window.scrollTo(0, document.documentElement.scrollHeight); return; }
+  // Facebook often scrolls an inner panel, not the browser window.
+  let panel = last ? last.parentElement : null;
+  while (panel && panel !== document.body) {
+    if (panel.scrollHeight > panel.clientHeight + 20 &&
+        /auto|scroll/.test(getComputedStyle(panel).overflowY)) break;
+    panel = panel.parentElement;
+  }
+  const scroller = panel && panel !== document.body ? panel : document.scrollingElement;
+  const before = scroller.scrollTop;
+  if (toBottom) { scroller.scrollTop = scroller.scrollHeight; return; }
   if (last) last.scrollIntoView({block: 'end'});
   // Bring the "load more" area below the last card into view as well.
-  window.scrollBy(0, 300);
-  if (window.scrollY === before) window.scrollBy(0, Math.max(200, innerHeight * 0.8));
+  scroller.scrollTop += 300;
+  if (scroller.scrollTop === before) scroller.scrollTop += Math.max(200, scroller.clientHeight * 0.8);
 }
 """
 
@@ -1193,6 +1201,7 @@ def read_all_listings_old_ui(page, sleep):
                 "clicksCount": parse_count(parsed["clicks"]),
                 "messagesCount": None,
                 "listingId": _clean(card.get("listingId")),
+                "cardId": card.get("cardId"),
                 "tab": section,
                 "state": ls.classify_status(section, parsed["status"], parsed["reason"]),
             })
@@ -1321,17 +1330,8 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
     target_sheet = post.get("_target_sheet", LIVE_CHECKER_SHEET)
     profile_label = post.get("profile name") or post.get("Profile Name") or post.get("profileName") or post.get("id")
 
-    def buyer_columns(has_live=False):
-        active = dict(options.checkers)
-        pending = bool(active and has_live)
-        return {
-            "PK Check": "Waiting" if pending and "PK" in active else "Not checked" if "PK" in active else "Off",
-            "US Check": "Waiting" if pending and "US" in active else "Not checked" if "US" in active else "Off",
-            "Visibility": "PENDING" if pending else "SKIPPED" if not active else "NOT_CHECKED",
-            "Visibility Details": f"Buyer sample: up to {options.limit} live listings per enabled buyer. Not a full visibility audit."
-                if pending else "Buyer checks off." if not active else "No verified live listings to check.",
-            "Visibility Checked": "",
-        } if target_sheet == LIVE_CHECKER_SHEET else {}
+    def buyer_columns(has_live=False, owner_failed=False):
+        return lv.owner_buyer_columns(options, has_live, owner_failed) if target_sheet == LIVE_CHECKER_SHEET else {}
 
     def write_columns(values):
         """One batched sheet write; failures are logged, never fatal."""
@@ -1379,12 +1379,15 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             "Scan Time": ls.format_duration(time.monotonic() - scan_started),
             "Total Listings": "", "Live Count": "", "Pending Count": "", "Rejected Count": "",
             "Other Count": "", "Status Summary": "", "Listing Details": "",
+            "Duplicate Count": "", "Duplicate Details": "",
             "All Listings": "", "Needs Attention": "",
         }
         values.update(extra or {})
-        values.update(buyer_columns())
+        if target_sheet == LIVE_CHECKER_SHEET:
+            values.update(lv.owner_buyer_columns(options, owner_failed=code != ls.NO_LISTINGS))
         post.pop("_live_counts", None)
         post.pop("_live_listings", None)
+        post.pop("_live_duplicates", None)
         write_columns(values)
         record_history(code)
         post["_live_check"] = code
@@ -1395,23 +1398,28 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         log(f"Needs attention: {needs_summary}")
         values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp(),
                   "Scan Time": ls.format_duration(time.monotonic() - scan_started)}
-        values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE))))
+        values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE)),
+                                    owner_failed=not (scan and scan["total"])))
         headline = ""
         if scan and scan["total"]:
             counts = scan["counts"]
             headline = scan["headline"]
             log(f"Full scan: {headline} ({scan['total']} listings; tabs: {scan['tabCounts']}) in "
                 f"{ls.format_duration(time.monotonic() - scan_started)}")
+            log(f"Facebook-marked duplicates: {scan['duplicates']} (included in Rejected, not added to Total).")
             values.update({
                 "Total Listings": scan["total"],
                 "Live Count": counts.get(ls.LIVE, 0),
                 "Pending Count": counts.get(ls.PENDING, 0),
                 "Rejected Count": counts.get(ls.REJECTED, 0),
                 "Other Count": scan["other"],
+                "Duplicate Count": scan["duplicates"],
+                "Duplicate Details": scan["duplicateDetails"],
                 "Status Summary": headline,
                 "Listing Details": scan["details"],
             })
             post["_live_counts"] = counts
+            post["_live_duplicates"] = scan["duplicates"]
             post["_live_listings"] = scan["listings"]  # for the PK/US checker visibility pass
             if scan["notes"]:
                 values["Check Result"] = ls.format_check_result("PARTIAL", "; ".join(scan["notes"]))
@@ -1541,7 +1549,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 # Zero the counts so an old scan's numbers do not look current.
                 fail(ls.NO_LISTINGS, "the listings table is empty (this profile may have no listings)", extra={
                     "Total Listings": 0, "Live Count": 0, "Pending Count": 0, "Rejected Count": 0,
-                    "Other Count": 0, "Status Summary": "No listings", "Listing Details": "",
+                    "Other Count": 0, "Duplicate Count": 0, "Status Summary": "No listings", "Listing Details": "",
                 })
             if result is None:
                 if page.is_closed():

@@ -5,15 +5,21 @@ import os
 import time
 import requests
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-# Launches for different profiles may run concurrently, while duplicate launch
-# requests for the same profile must remain serialized.  The semaphore protects
-# the local Incogniton service from an unbounded burst when this module is used
-# outside the automation engine (the engine currently defaults to three workers).
-_MAX_CONCURRENT_LAUNCHES = 3
+# Serialize browser startup, not browsing: once CDP is ready the next profile
+# may start while this profile scans. Concurrent cold launches can overload the
+# provider's sync/proxy initialization and time out even after Chrome opens.
+_MAX_CONCURRENT_LAUNCHES = 1
 _launch_capacity = threading.BoundedSemaphore(_MAX_CONCURRENT_LAUNCHES)
 _profile_launch_locks = {}
 _profile_launch_locks_guard = threading.Lock()
+_uncertain_launches = set()  # launch transport failed; Incogniton may still open our browser
+_launch_attempts = {}
+_LAUNCH_WAIT_SECONDS = 60
+_LAUNCH_POLL_SECONDS = 0.5
+_LAUNCH_HTTP_TIMEOUT = (3, 120)
 _PROFILE_CACHE_TTL_SECONDS = 15.0
 _PROFILE_ERROR_CACHE_TTL_SECONDS = 2.0
 _profile_cache_lock = threading.Lock()
@@ -27,10 +33,21 @@ from core.utils.path_finder import find_incogniton_path
 INCOGNITON_API = "http://127.0.0.1:35000"
 
 from core.engine.retry_manager import RetryManager
-from core.engine.exceptions import RetryableError, PermanentError
+from core.engine.exceptions import RetryableError, PermanentError, AutomationStopped
 from core.utils.smart_match import match_indices
 
 _api_retry = RetryManager(max_attempts=3, backoff_seconds=2.0)
+
+
+@dataclass
+class _LaunchAttempt:
+    done: threading.Event = field(default_factory=threading.Event)
+    started: float = field(default_factory=time.monotonic)
+    response: object = None
+    error: object = None
+    attached: bool = False
+    stopped: bool = False
+    expired: bool = False
 
 
 def _friendly_incogniton_error(error):
@@ -74,7 +91,7 @@ def _launch_log(logger_callback, message):
 
 
 @contextmanager
-def _profile_launch_slot(profile_id, logger_callback=None):
+def _profile_launch_slot(profile_id, logger_callback=None, stop_event=None):
     """Serializes one profile ID while allowing bounded cross-profile launches."""
     with _profile_launch_locks_guard:
         entry = _profile_launch_locks.get(profile_id)
@@ -91,16 +108,22 @@ def _profile_launch_slot(profile_id, logger_callback=None):
             f"Profile {profile_id} already has a launch in progress; waiting for it to finish...",
         )
 
-    profile_lock.acquire()
+    profile_acquired = False
     capacity_acquired = False
     try:
+        while not profile_lock.acquire(timeout=0.2):
+            _check_launch_stop(stop_event)
+        profile_acquired = True
+        _check_launch_stop(stop_event)
         if not _launch_capacity.acquire(blocking=False):
             _launch_log(
                 logger_callback,
-                f"Launch capacity is full ({_MAX_CONCURRENT_LAUNCHES} profiles); waiting for a slot...",
+                "Another profile is starting; waiting for its browser to be ready. Existing scans continue in parallel...",
             )
-            _launch_capacity.acquire()
+            while not _launch_capacity.acquire(timeout=0.2):
+                _check_launch_stop(stop_event)
         capacity_acquired = True
+        _check_launch_stop(stop_event)
 
         queued_for = time.monotonic() - queue_started
         _launch_log(
@@ -111,7 +134,8 @@ def _profile_launch_slot(profile_id, logger_callback=None):
     finally:
         if capacity_acquired:
             _launch_capacity.release()
-        profile_lock.release()
+        if profile_acquired:
+            profile_lock.release()
         with _profile_launch_locks_guard:
             entry["users"] -= 1
             if entry["users"] == 0:
@@ -280,7 +304,173 @@ def resolve_profile_id(identifier, duplicate_resolver=None, master=None):
     except Exception:
         return None
 
-def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=3, logger_callback=None):
+def _browser_option(args, name):
+    for index, arg in enumerate(args):
+        if arg.startswith(name + "="):
+            return arg.split("=", 1)[1].strip('"')
+        if arg == name and index + 1 < len(args):
+            return args[index + 1].strip('"')
+    return ""
+
+
+def _check_launch_stop(stop_event):
+    if stop_event and stop_event.is_set():
+        raise AutomationStopped("User stopped while waiting for the browser to launch.")
+
+
+def _profile_cdp_candidates(profile_id):
+    """Find ports belonging to this exact UUID, never another open browser."""
+    ports = set()
+    for process in psutil.process_iter(["name", "cmdline"]):
+        try:
+            if str(process.info.get("name") or "").lower() not in (
+                "chrome.exe", "chrome", "chromium.exe", "chromium",
+            ):
+                continue
+            args = process.info.get("cmdline") or []
+            if any(arg.startswith("--type=") for arg in args):
+                continue  # renderer/utility processes repeat the browser's arguments
+            directory = _browser_option(args, "--user-data-dir")
+            basename = directory.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+            if basename.lower() != profile_id.lower():
+                continue
+            port = _browser_option(args, "--remote-debugging-port")
+            if port.isdigit() and 0 < int(port) < 65536:
+                ports.add(int(port))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return [f"http://127.0.0.1:{port}" for port in sorted(ports)]
+
+
+def _probe_cdp(endpoint):
+    """Verify a local DevTools endpoint without opening/closing any browser tabs."""
+    try:
+        parsed = urlsplit(endpoint if "://" in endpoint else f"http://{endpoint}")
+        if parsed.scheme not in ("http", "https", "ws", "wss"):
+            return None
+        if parsed.hostname not in ("127.0.0.1", "localhost", "::1") or not parsed.port:
+            return None
+        host = "[::1]" if parsed.hostname == "::1" else parsed.hostname
+        origin = f"http://{host}:{parsed.port}"
+        response = requests.get(f"{origin}/json/version", timeout=(0.5, 0.5), allow_redirects=False)
+        if response.status_code != 200:
+            return None
+        websocket = response.json().get("webSocketDebuggerUrl") or ""
+        target = urlsplit(websocket)
+        if (target.scheme not in ("ws", "wss") or target.hostname not in ("127.0.0.1", "localhost", "::1")
+                or target.port != parsed.port or not target.path.startswith("/devtools/browser/")):
+            return None
+        return {"status": "ok", "url": websocket, "puppeteerUrl": origin,
+                "webSocketDebuggerUrl": websocket}
+    except (requests.exceptions.RequestException, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _ready_profile_cdp(profile_id, data=None):
+    data = data or {}
+    hint = data.get("url") or data.get("puppeteerUrl") or data.get("webSocketDebuggerUrl")
+    if not hint and data.get("port"):
+        hint = f"http://127.0.0.1:{data['port']}"
+    if hint:
+        ready = _probe_cdp(hint)
+        if ready:
+            return ready
+    for endpoint in _profile_cdp_candidates(profile_id):
+        ready = _probe_cdp(endpoint)
+        if ready:
+            return ready
+    return None
+
+
+def _begin_launch(profile_id):
+    """One HTTP request per attempt; an early CDP connection need not wait for it."""
+    attempt = _LaunchAttempt()
+    _launch_attempts[profile_id] = attempt
+    _uncertain_launches.add(profile_id)
+
+    def request():
+        try:
+            attempt.response = _api_request(
+                "get", f"/automation/launch/puppeteer/{profile_id}",
+                timeout=_LAUNCH_HTTP_TIMEOUT, retry=False,
+            )
+        except Exception as exc:
+            attempt.error = exc
+        finally:
+            attempt.done.set()
+
+    try:
+        threading.Thread(target=request, name=f"IncognitonLaunch-{profile_id[:8]}", daemon=True).start()
+    except Exception:
+        _launch_attempts.pop(profile_id, None)
+        _uncertain_launches.discard(profile_id)
+        raise
+    return attempt
+
+
+def _wait_for_launch(profile_id, attempt, logger_callback, stop_event=None):
+    deadline = time.monotonic() + _LAUNCH_WAIT_SECONDS
+    next_log = time.monotonic() + 5
+    while True:
+        _check_launch_stop(stop_event)
+        if attempt.stopped and attempt.done.is_set():
+            return False, "PROFILE_LAUNCH_PENDING: The previous launch was stopped. Re-check this profile to start a new session."
+        data = {}
+        if attempt.done.is_set() and attempt.response is not None:
+            try:
+                if 400 <= attempt.response.status_code < 500:
+                    _launch_attempts.pop(profile_id, None)
+                    _uncertain_launches.discard(profile_id)
+                    return False, f"Incogniton rejected the launch (HTTP {attempt.response.status_code}). Check the profile and API permissions."
+                if attempt.response.status_code == 200:
+                    data = attempt.response.json()
+                    if not isinstance(data, dict):
+                        data = {}
+                    if data.get("status") == "error":
+                        # An explicit rejection is not permission to take over
+                        # a browser opened elsewhere in the meantime.
+                        _launch_attempts.pop(profile_id, None)
+                        _uncertain_launches.discard(profile_id)
+                        if "already open" in str(data.get("message") or "").lower():
+                            return False, "PROFILE_ALREADY_OPEN: Close this profile in Incogniton before retrying."
+                        return False, f"Incogniton returned error: {data.get('message') or data}"
+            except (ValueError, TypeError):
+                pass
+        if not attempt.stopped:
+            ready = _ready_profile_cdp(profile_id, data)
+            if ready:
+                _check_launch_stop(stop_event)
+                attempt.attached = True
+                _uncertain_launches.discard(profile_id)
+                elapsed = time.monotonic() - attempt.started
+                recovered = not data.get("status") == "ok"
+                note = " Recovered our running browser without another launch request." if recovered else ""
+                _launch_log(logger_callback, f"Browser CDP ready for profile {profile_id} after {elapsed:.1f}s.{note}")
+                return True, ready
+        now = time.monotonic()
+        if now >= deadline:
+            attempt.expired = True
+            detail = str(attempt.error) if attempt.error else "The provider has not supplied a ready browser connection."
+            return False, (
+                f"PROFILE_LAUNCH_PENDING: Browser was not ready within {_LAUNCH_WAIT_SECONDS}s. {detail} "
+                "No duplicate launch sent and no browser was stopped. Check the profile's proxy/sync status in "
+                "Incogniton; close the unfinished profile before re-checking."
+            )
+        if now >= next_log:
+            _launch_log(logger_callback, f"Waiting for profile {profile_id}'s browser connection "
+                        f"({now - attempt.started:.0f}s); no additional launch request sent...")
+            next_log = now + 5
+        pause = min(_LAUNCH_POLL_SECONDS, deadline - now)
+        if stop_event:
+            if stop_event.wait(pause):
+                raise AutomationStopped("User stopped while waiting for the browser to launch.")
+        elif not attempt.done.is_set():
+            attempt.done.wait(pause)
+        else:
+            time.sleep(pause)
+
+
+def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=3, logger_callback=None, stop_event=None):
     """
     Starts an Incogniton profile for automation and returns the debugging WebSocket URL.
     Uses: /automation/launch/puppeteer/{profile_id}
@@ -290,45 +480,48 @@ def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=
     if not profile_id:
         return False, f"Could not find profile with name/id: {identifier}"
 
-    # ``max_retries`` remains in the public signature for compatibility with
-    # existing callers.  Launch retries are deliberately owned by ProfileWorker;
-    # retrying here as well multiplies a 120-second transport timeout by both
-    # retry layers and blocks queued profiles for many minutes.
+    # Compatibility only: never replay an ambiguous launch transport failure.
     _ = max_retries
 
-    with _profile_launch_slot(profile_id, logger_callback):
-        request_started = time.monotonic()
+    with _profile_launch_slot(profile_id, logger_callback, stop_event):
+        attempt = _launch_attempts.get(profile_id)
+        if attempt:
+            closed = attempt.stopped and attempt.done.is_set()
+            if attempt.done.is_set() and (attempt.expired or attempt.attached) and not closed:
+                # A later user re-check may start again after the unfinished
+                # browser was closed. Never reset while the HTTP request runs.
+                try:
+                    state_response = _api_request("get", f"/profile/status/{profile_id}", timeout=(1, 3), retry=False)
+                    closed = (state_response.status_code == 200 and
+                              str(state_response.json().get("status") or "").lower() == "ready" and
+                              not _profile_cdp_candidates(profile_id))
+                except Exception:
+                    pass
+            if closed:
+                _launch_attempts.pop(profile_id, None)
+                _uncertain_launches.discard(profile_id)
+            elif attempt.attached:
+                return False, "PROFILE_ALREADY_OPEN: This profile is already in use by an automation worker."
+            else:
+                _launch_log(logger_callback, "Resuming our previous launch; no new launch request will be sent.")
+                return _wait_for_launch(profile_id, attempt, logger_callback, stop_event)
+        if profile_id in _uncertain_launches:
+            return False, "PROFILE_LAUNCH_PENDING: Previous launch is unresolved. No duplicate launch sent."
         try:
-            _launch_log(
-                logger_callback,
-                "Sending one launch request to Incogniton. Profile-level retries are managed by the automation worker...",
-            )
-            response = _api_request(
-                "get",
-                f"/automation/launch/puppeteer/{profile_id}",
-                timeout=120,
-                retry=False,
-            )
-            elapsed = time.monotonic() - request_started
-            _launch_log(
-                logger_callback,
-                f"Incogniton launch request for profile {profile_id} finished in {elapsed:.2f}s (HTTP {response.status_code}).",
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "ok":
-                    return True, data
-                return False, f"Incogniton returned error: {data}"
-
-            return False, f"Failed to start profile. Status: {response.status_code}"
-        except Exception as e:
-            elapsed = time.monotonic() - request_started
-            _launch_log(
-                logger_callback,
-                f"Incogniton launch request for profile {profile_id} failed after {elapsed:.2f}s: {e}",
-            )
-            return False, str(e)
+            status_response = _api_request("get", f"/profile/status/{profile_id}", timeout=(1, 3), retry=False)
+            status = str(status_response.json().get("status") or "").lower()
+            if status_response.status_code != 200:
+                return False, "Could not verify profile status before launch. No launch sent."
+            if status == "launched":
+                return False, "PROFILE_ALREADY_OPEN: Close this profile in Incogniton before retrying."
+            if status != "ready":
+                return False, f"Profile is not ready ({status or 'unknown'}). No duplicate launch sent."
+        except Exception as exc:
+            return False, f"Could not verify profile status before launch: {exc}"
+        _launch_log(logger_callback, "Sending one launch request; watching for the browser connection "
+                    "so a slow API reply does not delay automation...")
+        _check_launch_stop(stop_event)
+        return _wait_for_launch(profile_id, _begin_launch(profile_id), logger_callback, stop_event)
 
 def stop_profile(identifier):
     """
@@ -342,7 +535,22 @@ def stop_profile(identifier):
     try:
         url = f"{INCOGNITON_API}/profile/stop/{profile_id}"
         response = _api_request("get", f"/profile/stop/{profile_id}", timeout=30)
-        return response.status_code == 200
+        if response.status_code != 200:
+            return False
+        try:
+            if response.json().get("status") == "error":
+                return False
+        except (ValueError, AttributeError):
+            pass  # older versions may return plain text for a successful stop
+        with _profile_launch_locks_guard:
+            attempt = _launch_attempts.get(profile_id)
+            if attempt:
+                attempt.stopped = True
+                attempt.attached = False
+                if attempt.done.is_set():
+                    _launch_attempts.pop(profile_id, None)
+            _uncertain_launches.discard(profile_id)
+        return True
     except:
         return False
 
@@ -447,5 +655,3 @@ def update_profile_proxy(profile_id, proxy_str):
             
     except Exception as e:
         return False, f"Error updating proxy: {str(e)}"
-
-

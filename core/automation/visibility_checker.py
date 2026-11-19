@@ -80,6 +80,16 @@ def _debug_url(data):
 
 def _blocked_reason(page):
     try:
+        offline = page.evaluate(r"""() => navigator.onLine === false ||
+            /ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_NAME_NOT_RESOLVED|ERR_PROXY_CONNECTION_FAILED/.test(
+                document.body ? document.body.innerText : '')""")
+        if offline is True:
+            return lv.NETWORK_ERROR
+    except AutomationStopped:
+        raise
+    except Exception:
+        pass
+    try:
         for sel in _LOGGED_OUT_SELECTORS:
             if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
                 return "LOGGED_OUT"
@@ -99,12 +109,17 @@ def _blocked_reason(page):
 
 
 def _goto(page, url, sleep):
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=20000)
-    except Exception:
-        return False
-    sleep(0.2)  # cooperative stop checkpoint, not a multi-second fixed delay
-    return True
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            sleep(0.2)
+            return True
+        except AutomationStopped:
+            raise
+        except Exception:
+            if attempt == 0:
+                sleep(2.0)  # bounded recovery for a Wi-Fi/IP change, never a visibility miss
+    return False
 
 
 def _search(page, target, sleep, cache=None, need=1, exhaustive=False):
@@ -120,6 +135,8 @@ def _search(page, target, sleep, cache=None, need=1, exhaustive=False):
             return ""
     if not _goto(page, key, sleep):
         return None
+    if _blocked_reason(page):
+        return None  # login-wall/background cards are not usable search results
     try:
         page.wait_for_function(r"""() =>
             document.querySelector('a[href*="/marketplace/item/"], input[name="email"]') ||
@@ -134,6 +151,8 @@ def _search(page, target, sleep, cache=None, need=1, exhaustive=False):
         except Exception:
             return None
         collected.extend(results)
+        if _blocked_reason(page):
+            return None
         kind = lv.match_in_search(collected, target, need)
         if kind and not exhaustive:
             if cache is not None:
@@ -184,7 +203,9 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
         return [lv.UNCLEAR] * len(targets)
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(debug_url, timeout=30000)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        if not browser.contexts:
+            raise RuntimeError("Profile has no persistent browser context; refusing an unauthenticated buyer check.")
+        context = browser.contexts[0]
         page = context.new_page()
         try:
             _goto(page, MARKETPLACE_HOME, sleep)
@@ -192,7 +213,7 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
             if blocked:
                 capture_diagnostics(page, f"checker_{label}", log)
                 log(f"[{label} checker] {blocked}: cannot check listings with this account.")
-                return [lv.ERROR] * len(targets)
+                return [_checker_failure_state(blocked)] * len(targets)
 
             for number, target in enumerate(targets, 1):
                 if on_detail:
@@ -232,18 +253,27 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
                             cards = search_cache.get(lv.search_url(target["title"]), ([], True))[0]
                             log(f"[{label} checker] '{target['title']}' {target.get('price', '')} not in search "
                                 f"(saw: {lv.describe_results(cards)})")
-                    if listing_id and state not in (lv.ERROR, lv.UNCLEAR):
-                        result_cache[listing_id] = state
                     blocked = _blocked_reason(page)
                     if blocked:
                         sleep(3.0)  # a passing pop-up is not a block: look again before giving up
+                        if blocked == lv.NETWORK_ERROR:
+                            log(f"[{label} checker] Connection interrupted; retrying this page once...")
+                            search_cache.pop(lv.search_url(target["title"]), None)
+                            _goto(page, page.url, sleep)
+                            state = lv.UNCLEAR  # pre-interruption cards cannot establish a verdict
                         blocked = _blocked_reason(page)
                     if blocked:
                         capture_diagnostics(page, f"checker_{label}", log)
-                        log(f"[{label} checker] account blocked mid-run ({blocked}); stopping this checker. "
-                            "Open the profile by hand to see what Facebook is asking for.")
-                        results.extend([lv.ERROR] * (len(targets) - len(results)))
+                        hint = ("Restore the internet/proxy connection and re-run the check."
+                                if blocked == lv.NETWORK_ERROR else
+                                "Open this checker profile and sign in again." if blocked == "LOGGED_OUT" else
+                                "Open this checker profile to complete Facebook's account check.")
+                        log(f"[{label} checker] Check interrupted ({blocked}); stopping this checker. {hint} "
+                            "This is not evidence that the seller listings are hidden or the account is banned.")
+                        results.extend([_checker_failure_state(blocked)] * (len(targets) - len(results)))
                         break
+                    if listing_id and state not in lv.UNVERIFIED_STATES:
+                        result_cache[listing_id] = state
                 except AutomationStopped:
                     results.extend([lv.UNCLEAR] * (len(targets) - len(results)))
                     return results
@@ -263,6 +293,11 @@ def check_listings(debug_url, label, targets, log, sleep, on_result=None, on_det
             except Exception:
                 pass
     return results
+
+
+def _checker_failure_state(reason):
+    return {"LOGGED_OUT": lv.LOGIN_REQUIRED, "CHECKPOINT": lv.CHECKPOINT,
+            lv.NETWORK_ERROR: lv.NETWORK_ERROR}.get(reason, lv.ERROR)
 
 
 def run_visibility_checks(posts, log, stop_event, master=None, progress=None, options=None, detail=None):
@@ -329,7 +364,8 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
             return
         log(f"[{label} checker] Starting profile '{profile}'...")
         from gui.ui_helpers import resolve_duplicates_ui
-        started, data = start_profile(profile, duplicate_resolver=resolve_duplicates_ui, master=master, logger_callback=log)
+        started, data = start_profile(profile, duplicate_resolver=resolve_duplicates_ui, master=master,
+                                     logger_callback=log, stop_event=stop_event)
         url = _debug_url(data) if started else ""
         if not url:
             log(f"[{label} checker] could not start: {data if not started else 'no CDP endpoint'}")
@@ -357,6 +393,11 @@ def run_visibility_checks(posts, log, stop_event, master=None, progress=None, op
         except Exception as exc:  # a launch failure on one buyer must not lose the other's results
             log(f"[{label} checker] failed: {exc}")
             per_label[label] = [lv.ERROR] * len(flat)
+        finally:
+            remaining = len(flat) - counted.get(label, 0)
+            if remaining > 0:
+                counted[label] = len(flat)
+                advance(remaining)
 
     with ThreadPoolExecutor(max_workers=max(1, len(checkers))) as pool:
         for future in [pool.submit(guarded, label, profile) for label, profile in checkers]:

@@ -12,6 +12,7 @@ from gui.views import dominancy_checker_view as dominancy
 from gui.views import response_checker_view as response
 from gui.views.live_checker_view import LiveCheckerView
 from gui.views import settings_view
+from core.automation import listing_visibility as lv
 
 
 VIEW_CLASSES = (fb.FBListingView, dominancy.DominancyCheckerView, response.ResponseCheckerView)
@@ -189,6 +190,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_live_checker_displays_other_counts_and_unknown_failed_totals(self):
         view = self.make_view(LiveCheckerView)
+        view.run_options = lv.BuyerOptions(pk_profile="pk", us_profile="us")
         view.total_count = 2
         view._on_profile_done({
             "rowNumber": 3, "Profile Name": "Seller",
@@ -200,6 +202,9 @@ class DashboardTests(unittest.TestCase):
         view._on_profile_done({"rowNumber": 2, "Profile Name": "Unread", "_live_check": "LAYOUT_UNKNOWN"}, False)
         self.assertEqual(view.table.rows[2]["values"]["Total"], "—")
         self.assertEqual(view.table.rows[2]["values"]["Live"], "—")
+        self.assertIn("seller scan failed", view.table.rows[2]["values"]["PK"])
+        self.assertIn("seller scan failed", view.table.rows[2]["values"]["US"])
+        self.assertEqual(view.table.rows[2]["values"]["Visibility"], "NOT_CHECKED")
 
     def test_progress_can_finish_with_a_warning_color(self):
         view = self.make_view()

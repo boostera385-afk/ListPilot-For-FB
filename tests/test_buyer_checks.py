@@ -68,7 +68,8 @@ class BuyerRuntimeTests(unittest.TestCase):
         page = mock.Mock()
         page.evaluate.return_value = [{"href": "/marketplace/item/999/", "text": "Other seller"}]
         cache = {}
-        with mock.patch.object(vc, "_goto", return_value=True) as goto:
+        with mock.patch.object(vc, "_goto", return_value=True) as goto, \
+             mock.patch.object(vc, "_blocked_reason", return_value=""):
             self.assertFalse(vc._search(page, {"title": "Same title", "listingId": "1"}, lambda _: None, cache))
             self.assertFalse(vc._search(page, {"title": "Same title", "listingId": "2"}, lambda _: None, cache))
         goto.assert_called_once()
@@ -186,9 +187,19 @@ class MidRunBlockTests(unittest.TestCase):
     def test_a_confirmed_block_stops_the_checker_with_a_reason_and_a_screenshot(self):
         # startup ok, then blocked twice (the re-check confirms it)
         results, logs, capture = self.run_check(["", "LOGGED_OUT", "LOGGED_OUT"])
-        self.assertEqual(results, [lv.ERROR, lv.ERROR])
+        self.assertEqual(results, [lv.LOGIN_REQUIRED, lv.LOGIN_REQUIRED])
         capture.assert_called_once()
-        self.assertTrue(any("blocked mid-run (LOGGED_OUT)" in line for line in logs))
+        self.assertTrue(any("interrupted (LOGGED_OUT)" in line for line in logs))
+
+    def test_completed_results_survive_a_later_sign_in_prompt(self):
+        results, logs, capture = self.run_check(["", "", "LOGGED_OUT", "LOGGED_OUT"])
+        self.assertEqual(results, [lv.SEARCH, lv.LOGIN_REQUIRED])
+        self.assertTrue(any("not evidence" in line for line in logs))
+
+    def test_network_interruption_is_not_called_logged_out(self):
+        results, logs, capture = self.run_check(["", lv.NETWORK_ERROR, lv.NETWORK_ERROR])
+        self.assertEqual(results, [lv.NETWORK_ERROR, lv.NETWORK_ERROR])
+        self.assertFalse(any("LOGGED_OUT" in line for line in logs))
 
     def test_a_passing_popup_does_not_stop_the_checker(self):
         # startup ok, blocked once, clear on the re-check, then clear for the next listing

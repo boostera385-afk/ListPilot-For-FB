@@ -20,6 +20,10 @@ class ClassifyStatusTests(unittest.TestCase):
             ls.REJECTED,
         )
 
+    def test_duplicate_notice_beats_active_even_outside_needs_attention(self):
+        self.assertEqual(ls.classify_status("All listings", "Active",
+                                           "This looks like a duplicate so we didn't post it"), ls.REJECTED)
+
     def test_needs_attention_tab_is_never_live(self):
         self.assertEqual(ls.classify_status("Needs attention", "Active"), ls.REJECTED)
         self.assertEqual(ls.classify_status("Needs attention", ""), ls.REJECTED)
@@ -86,6 +90,27 @@ class CountingTests(unittest.TestCase):
         scan = ls.build_scan_result([{"state": ls.LIVE, "title": "A", "listingId": "1"}], {"Active": 1})
         self.assertEqual(scan["total"], 1)
         self.assertEqual(scan["headline"], "1 LIVE")
+
+    def test_duplicate_count_is_a_subset_not_an_extra_listing(self):
+        scan = ls.build_scan_result([
+            {"listingId": "1", "state": ls.REJECTED, "title": "Carpet", "reason": "This looks like a duplicate"},
+            {"listingId": "1", "state": ls.REJECTED, "title": "Carpet", "reason": "This looks like a duplicate"},
+            {"listingId": "2", "state": ls.LIVE, "title": "Carpet"},
+        ])
+        self.assertEqual(scan["duplicates"], 1)
+        self.assertEqual(scan["total"], 2)
+        self.assertEqual(sum(scan["counts"].values()), 2)
+        self.assertIn("Carpet", scan["duplicateDetails"])
+
+    def test_identical_old_cards_keep_multiplicity_across_sections(self):
+        card = {"title": "Roof", "state": ls.REJECTED, "price": "$50"}
+        scan = ls.build_scan_result([
+            dict(card, tab="Needs attention", cardId="1"),
+            dict(card, tab="Needs attention", cardId="2"),
+            dict(card, tab="All listings", cardId="3"),
+            dict(card, tab="All listings", cardId="4"),
+        ])
+        self.assertEqual(scan["total"], 2)
 
     def test_tab_mismatch(self):
         self.assertIn("read 2 of 5", ls.tab_total_mismatch({"Active": 5}, [{}, {}]))

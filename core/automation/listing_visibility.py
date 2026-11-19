@@ -17,6 +17,10 @@ LINK_ONLY = "LINK_ONLY"  # opens by its link but did not show in search
 HIDDEN = "HIDDEN"        # link says the listing is not available
 UNCLEAR = "UNCLEAR"      # page loaded but could not be read
 ERROR = "ERROR"          # checker could not check it (logged out, timeout, ...)
+LOGIN_REQUIRED = "LOGIN_REQUIRED"
+CHECKPOINT = "CHECKPOINT"
+NETWORK_ERROR = "NETWORK_ERROR"
+UNVERIFIED_STATES = (UNCLEAR, ERROR, LOGIN_REQUIRED, CHECKPOINT, NETWORK_ERROR)
 TEXT_MATCH = "TEXT_MATCH"  # in search by exact title + price; no listing ID to confirm it
 NOT_FOUND = "NOT_FOUND"    # searched, not in the results, and no listing ID to try the link
 
@@ -86,6 +90,27 @@ def _clean(value):
 
 def checker_column(label):
     return f"{label} Check"
+
+
+def owner_buyer_columns(options, has_live=False, owner_failed=False):
+    """Keep disabled buyers distinct from enabled buyers with no seller sample."""
+    active = dict(options.checkers)
+    pending = bool(active and has_live)
+    idle = "Seller scan failed" if owner_failed else "No live listings"
+    return {
+        **{checker_column(label): ("Waiting" if pending else f"Not checked: {idle.lower()}")
+           if label in active else "Off" for label in ("PK", "US")},
+        "PK vs US": ("Waiting" if pending else "Incomplete: seller scan failed" if owner_failed
+                     else "Not compared: no live listings") if len(active) == 2
+                    else "Not compared: both buyers must be enabled and configured",
+        "Visibility": "PENDING" if pending else "NOT_CHECKED" if active else "SKIPPED",
+        "Visibility Details": (
+            f"Buyer sample: up to {options.limit} live listings per enabled buyer. Not a full visibility audit."
+            if pending else "Buyer checks off." if not active else
+            f"{idle}; enabled buyers were not run. No visibility conclusion."
+        ),
+        "Visibility Checked": "",
+    }
 
 
 def visibility_targets(listings, limit=MAX_TARGETS_PER_PROFILE):
@@ -187,6 +212,8 @@ def state_label(state):
         SEARCH: "In search", TEXT_MATCH: "In search (title + price)",
         LINK_ONLY: "Link opens, not in search", NOT_FOUND: "Not in search",
         HIDDEN: "Unavailable", UNCLEAR: "Not verified", ERROR: "Error",
+        LOGIN_REQUIRED: "Login needed", CHECKPOINT: "Account check needed",
+        NETWORK_ERROR: "Connection interrupted",
     }.get(state, str(state))
 
 
@@ -197,7 +224,7 @@ def listing_verdict(states):
         return "Not checked"
     found = [s for s in states if s in (SEARCH, TEXT_MATCH)]
     missed = [s for s in states if s in (LINK_ONLY, NOT_FOUND)]
-    unchecked = [s for s in states if s in (UNCLEAR, ERROR)]
+    unchecked = [s for s in states if s in UNVERIFIED_STATES]
     if HIDDEN in states:
         return "Hidden from a buyer"
     note = " (a buyer could not check)" if unchecked else ""
@@ -228,10 +255,17 @@ def summarize_buyer_rows(rows):
             counts["not"] += 1
         else:
             counts["unverified"] += 1
-    words = (("visible", "visible in search"), ("some", "visible to some buyers"), ("not", "not in search"),
+    words = (("visible", "found by at least one buyer"), ("some", "visible to some buyers"), ("not", "not in search"),
              ("hidden", "hidden"), ("unverified", "not verified"))
     parts = [f"{len(rows)} listing{'s' if len(rows) != 1 else ''} checked"]
     parts += [f"{counts[key]} {word}" for key, word in words if counts[key]]
+    incomplete = sum(any(row.get(label) in UNVERIFIED_STATES for label in ("PK", "US")) for row in rows)
+    text_only = sum(any(row.get(label) == TEXT_MATCH for label in ("PK", "US")) and
+                    not any(row.get(label) == SEARCH for label in ("PK", "US")) for row in rows)
+    if incomplete:
+        parts.append(f"{incomplete} with incomplete buyer checks")
+    if text_only:
+        parts.append(f"{text_only} title+price only (identity unverified)")
     return "Buyer sample: " + " · ".join(parts)
 
 
@@ -259,10 +293,49 @@ def summarize_checker(results):
     if counts.get(TEXT_MATCH):
         parts.append(f"{counts[TEXT_MATCH]} by title+price")
     for state, word in ((LINK_ONLY, "link only"), (NOT_FOUND, "not found"), (HIDDEN, "unavailable"),
-                        (UNCLEAR, "unverified"), (ERROR, "error")):
+                        (UNCLEAR, "unverified"), (ERROR, "error"), (LOGIN_REQUIRED, "login needed"),
+                        (CHECKPOINT, "account check needed"), (NETWORK_ERROR, "connection interrupted")):
         if counts.get(state):
             parts.append(f"{counts[state]} {word}")
     return ", ".join(parts)
+
+
+def compare_regions(per_checker, expected=None):
+    """Compare the same listing positions, never just the two aggregate counts.
+
+    Same means matching observed outcomes, not that a listing is visible.
+    Title+price hits have the same search outcome as ID hits, but remain unverified.
+    Missing/error results take precedence over observed differences.
+    """
+    if "PK" not in per_checker or "US" not in per_checker:
+        return "Not compared: both buyers must be enabled and configured"
+    pk, us = per_checker["PK"], per_checker["US"]
+    total = max(len(pk), len(us)) if expected is None else expected
+    if len(pk) > total or len(us) > total:
+        return "Incomplete: buyer sample sizes differ"
+    if not total:
+        return "Not compared: no sampled listings"
+    outcomes = {SEARCH: "IN_SEARCH", TEXT_MATCH: "IN_SEARCH",
+                LINK_ONLY: LINK_ONLY, NOT_FOUND: NOT_FOUND, HIDDEN: HIDDEN}
+    same = different = unverified = 0
+    for index in range(total):
+        left = outcomes.get(pk[index]) if index < len(pk) else None
+        right = outcomes.get(us[index]) if index < len(us) else None
+        if left is None or right is None:
+            unverified += 1
+        elif left == right:
+            same += 1
+        else:
+            different += 1
+    if unverified:
+        result = f"Incomplete: {unverified}/{total} unverified; {same} same, {different} different"
+    elif different:
+        result = f"Different: {different}/{total} sampled listings; {same} same"
+    else:
+        result = f"Same: {same}/{total} sampled listings"
+    if TEXT_MATCH in pk or TEXT_MATCH in us:
+        result += " (includes title+price matches; identity unverified)"
+    return result
 
 
 def overall_visibility(per_checker):
@@ -280,7 +353,7 @@ def overall_visibility(per_checker):
     link_only = sum(1 for s in states if s in (LINK_ONLY, NOT_FOUND))
     if link_only:
         return f"NOT_IN_SEARCH: {link_only} result(s)"
-    gaps = sum(1 for s in states if s in (UNCLEAR, ERROR))
+    gaps = sum(1 for s in states if s in UNVERIFIED_STATES)
     if gaps:
         return f"PARTIAL: {gaps} result(s) not checked"
     text_only = sum(1 for s in states if s == TEXT_MATCH)
@@ -319,6 +392,7 @@ def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None):
     values = {checker_column(label): summarize_checker(results) for label, results in per_checker.items()}
     for label in disabled:
         values[checker_column(label)] = "Off"
+    values["PK vs US"] = compare_regions(per_checker, expected=len(targets))
     result = overall_visibility(per_checker)
     if skipped and result == ls.OK:
         result = f"PARTIAL: {skipped} listing(s) outside this sample"
@@ -328,6 +402,7 @@ def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None):
         scope += f" {skipped} not checked."
     scope += " Search results depend on the buyer account and Marketplace location."
     scope += " 'In search' = found by searching Marketplace as a buyer; 'link only' = opens by link but is not in search."
+    scope += f" PK vs US: {values['PK vs US']}. Matching results do not necessarily mean visible listings."
     if elapsed is not None:
         scope += f" Buyer check took {ls.format_duration(elapsed)}."
     values["Visibility Details"] = scope + "\n" + format_visibility_details(targets, per_checker)
