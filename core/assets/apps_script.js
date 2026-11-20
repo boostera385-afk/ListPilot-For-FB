@@ -45,7 +45,8 @@ const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Re
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
 // Buyer-side check from the Pakistani and USA checker accounts.
 const VISIBILITY_COLUMNS = ["PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked"];
-AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS, ["Buyer Listing Targets"]);
+const BUYER_HELP_COLUMNS = ["Buyer Summary", "Next Step", "Buyer Search Area"];
+AUTO_COLUMNS[SHEET_LIVE_CHECKER] = BUYER_HELP_COLUMNS.concat(["Responses", "All Listings", "Needs Attention"], LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS, ["Buyer Listing Targets"]);
 AUTO_COLUMNS[SHEET_RESPONSE_CHECKER] = ["Responses"];
 
 function jsonOut_(obj) {
@@ -150,6 +151,15 @@ function ensureColumn_(sheet, name) {
       sheet.insertColumnAfter(usIndex + 1);
       column = usIndex + 2;
     }
+    const helpIndex = BUYER_HELP_COLUMNS.indexOf(name);
+    if (helpIndex !== -1 && canonicalSheetName_(sheet) === SHEET_LIVE_CHECKER) {
+      const anchor = helpIndex === 0 ? "Profile Name" : BUYER_HELP_COLUMNS[helpIndex - 1];
+      const anchorIndex = findExact_(getHeaders_(sheet), anchor);
+      if (anchorIndex !== -1) {
+        sheet.insertColumnAfter(anchorIndex + 1);
+        column = anchorIndex + 2;
+      }
+    }
     sheet.getRange(1, column).setValue(name).setFontWeight("bold");
     // New columns match the existing header look instead of appearing plain.
     if (column > 1) sheet.getRange(1, column - 1).copyFormatToRange(sheet, column, column, 1, 1);
@@ -244,7 +254,7 @@ function formatListPilotSheet_(sheet) {
   // Plain text only for typed-in identifiers; counts, dates and any formulas keep their own format.
   body.setWrap(true).setHorizontalAlignment("left");
   // Keep logs/details readable without letting a 40-line cell fill the screen.
-  sheet.setRowHeightsForced(2, rows - 1, 42);
+  sheet.setRowHeightsForced(2, rows - 1, canonicalSheetName_(sheet) === SHEET_LIVE_CHECKER ? 88 : 42);
 
   const notes = {
     id: "Input: exact Incogniton/AdsPower profile ID. Stored as plain text.",
@@ -260,8 +270,11 @@ function formatListPilotSheet_(sheet) {
     uscheck: "US buyer sample. Only exact listing-ID hits count as in search; title+price is a possible match. Off means disabled. US is a configured profile label, not independently verified geography.",
     pkvsu: "Compares PK and US outcomes for each sampled listing, not just totals. Same may mean both buyers missed it. Different means observed outcomes differ. Incomplete means results are missing/unread or a buyer needs login/network recovery. Not compared means both buyers did not run. Title+price matches do not verify listing identity. Re-check profiles to populate this new column."
   };
+  notes.buyersummary = "Start here: plain-language buyer outcome. A failed buyer search is unknown, not zero live listings. Seller counts are separate from the small buyer sample.";
+  notes.nextstep = "What to do next. Fix a failed buyer before interpreting search misses. A working item link does not guarantee it appears in local search.";
+  notes.buyersearcharea = "City and radius visibly shown in each buyer's Marketplace search. PK/US are account labels, not verified geography. ZIP text in a query does not change the search area.";
   const numeric = new Set(["responses", "response", "totallisting", "livecount", "pendingcount", "rejectedcount", "othercount", "total", "live", "pending", "rejected"]);
-  const statusColumns = new Set(["status", "checkresult", "visibility", "pkcheck", "uscheck"]);
+  const statusColumns = new Set(["status", "checkresult", "visibility", "pkcheck", "uscheck", "buyersummary"]);
   // Replace only this helper's own rules on repeat runs; preserve user rules.
   const rules = sheet.getConditionalFormatRules().filter(rule => {
     const condition = rule.getBooleanCondition();
@@ -299,6 +312,11 @@ function formatListPilotSheet_(sheet) {
       sheet.setColumnWidth(column, 380);
     } else if (key === "status" || key === "checkresult") {
       sheet.setColumnWidth(column, 300);
+    } else if (key === "buyersummary" || key === "nextstep") {
+      sheet.setColumnWidth(column, 420);
+      sheet.getRange(1, column).setBackground("#14665B");
+    } else if (key === "buyersearcharea") {
+      sheet.setColumnWidth(column, 300);
     } else if (key === "visibility" || key === "pkcheck" || key === "uscheck" || key === "pkvsu") {
       sheet.setColumnWidth(column, 240);
     } else if (key === "scantime") {
@@ -315,9 +333,9 @@ function formatListPilotSheet_(sheet) {
     }
     if (statusColumns.has(key)) {
       rule(range, key + ":error", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^failed|logged_out|checkpoint|layout_unknown|no_marketplace|timeout|hidden|error|unavailable")', "#FDEBEC", "#A32632");
-      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)partial|not_in_search|action_required|link only|not found|title\\+price|unverified|waiting|claimed|pending")', "#FFF3D6", "#825500");
+      rule(range, key + ":warning", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)partial|not_in_search|action_required|link only|not found|title\\+price|unverified|waiting|claimed|pending|could not|incomplete|not confirmed|not seen|similar listing|only a sample")', "#FFF3D6", "#825500");
       rule(range, key + ":off", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(off|skipped|not_checked|no_listings|stopped)")', "#EDF0F5", "#596579");
-      rule(range, key + ":ok", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(success|ok)|^[0-9]+/[0-9]+ in search$")', "#E7F5ED", "#175A36");
+      rule(range, key + ":ok", 'REGEXMATCH(TO_TEXT(' + cell + '),"(?i)^(success|ok)|^[1-9][0-9]*/[1-9][0-9]* in search$|^Found in search: [1-9][0-9]* of [1-9][0-9]* sampled\\.$|^[1-9][0-9]* buyer check\\(s\\) found the exact listing in search\\.$")', "#E7F5ED", "#175A36");
     }
   });
   rule(body, "band", "MOD(ROW(),2)=0", "#F3F6FC", "#172033");

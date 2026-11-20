@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 # provider's sync/proxy initialization and time out even after Chrome opens.
 _MAX_CONCURRENT_LAUNCHES = 1
 _launch_capacity = threading.BoundedSemaphore(_MAX_CONCURRENT_LAUNCHES)
+_stop_capacity = threading.Lock()  # provider sync/stop requests can conflict across profiles
+_STOP_CONFIRM_POLLS = 6
 _profile_launch_locks = {}
 _profile_launch_locks_guard = threading.Lock()
 _uncertain_launches = set()  # launch transport failed; Incogniton may still open our browser
@@ -549,6 +551,22 @@ def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=
         _check_launch_stop(stop_event)
         return _wait_for_launch(profile_id, _begin_launch(profile_id), logger_callback, stop_event)
 
+def _confirm_profile_stopped(profile_id):
+    """A stop error/timeout can still close Chrome. Verify status AND exact-profile processes."""
+    for attempt in range(_STOP_CONFIRM_POLLS):
+        try:
+            response = _api_request("get", f"/profile/status/{profile_id}", timeout=(1, 3), retry=False)
+            status = str(response.json().get("status") or "").strip().lower()
+            if (response.status_code == 200 and status in ("ready", "stopped", "closed")
+                    and not _profile_cdp_candidates(profile_id)):
+                return True
+        except Exception:
+            pass
+        if attempt + 1 < _STOP_CONFIRM_POLLS:
+            time.sleep(0.5)
+    return False
+
+
 def stop_profile(identifier):
     """
     Stops an Incogniton profile.
@@ -558,16 +576,15 @@ def stop_profile(identifier):
     if not profile_id:
         return False
         
-    try:
-        url = f"{INCOGNITON_API}/profile/stop/{profile_id}"
-        response = _api_request("get", f"/profile/stop/{profile_id}", timeout=30)
-        if response.status_code != 200:
-            return False
+    with _stop_capacity:
         try:
-            if response.json().get("status") == "error":
-                return False
-        except (ValueError, AttributeError):
-            pass  # older versions may return plain text for a successful stop
+            # One bounded request, not the generic HTTP retry loop. Even a
+            # transport error may mean the provider already closed the browser.
+            _api_request("get", f"/profile/stop/{profile_id}", timeout=(3, 15), retry=False)
+        except Exception:
+            pass
+        if not _confirm_profile_stopped(profile_id):
+            return False
         with _profile_launch_locks_guard:
             attempt = _launch_attempts.get(profile_id)
             if attempt:
@@ -577,8 +594,6 @@ def stop_profile(identifier):
                     _launch_attempts.pop(profile_id, None)
             _uncertain_launches.discard(profile_id)
         return True
-    except:
-        return False
 
 def update_profile_proxy(profile_id, proxy_str):
     """

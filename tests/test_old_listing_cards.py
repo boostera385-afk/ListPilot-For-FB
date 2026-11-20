@@ -180,6 +180,30 @@ class OldCardBrowserTests(unittest.TestCase):
         self.assertEqual([item["href"] for item in cards], ["/marketplace/item/111/"])
         self.assertFalse(lv.found_in_search(cards, {"listingId": "555"}))
 
+    def test_search_reads_results_when_the_first_main_is_the_filters_sidebar(self):
+        self.render("""<div role="main"><h1>Search results</h1><h2>Filters</h2><p>City, TX</p></div>
+          <div role="main"><a href="/marketplace/item/123456/">Roof repair</a>
+          <h2>Suggested listings</h2><a href="/marketplace/item/999999/">Other</a></div>""")
+        self.assertEqual([row["href"] for row in self.page.evaluate(vc._SEARCH_RESULTS_JS)],
+                         ["/marketplace/item/123456/"])
+
+    def test_shown_search_area_is_read_without_guessing_from_the_account_label(self):
+        self.render("<aside><div>McKinney, Texas</div><div>&nbsp; · Within 20 mi</div></aside>")
+        self.assertEqual(self.page.evaluate(vc._SEARCH_AREA_JS), "McKinney, Texas — within 20 mi")
+
+    def test_native_close_button_waits_for_the_dialog_animation(self):
+        self.render("""<div role="dialog"><button aria-label="Close"
+          onclick="setTimeout(() => this.parentElement.remove(), 1100)">Close</button></div>""")
+        self.assertTrue(lc._close_listing_dialog(self.page, self.sleep))
+        self.assertEqual(self.page.locator('[role="dialog"]:visible').count(), 0)
+
+    def test_escape_closes_a_dialog_without_a_recognised_close_button(self):
+        self.render('<div role="dialog">Your listing</div>')
+        self.page.evaluate("""() => document.addEventListener('keydown', e => {
+          if (e.key === 'Escape') document.querySelector('[role="dialog"]').remove();
+        })""")
+        self.assertTrue(lc._close_listing_dialog(self.page, self.sleep))
+
     def test_listing_identity_notice_is_not_an_account_checkpoint(self):
         self.render("<h1>Your listings</h1>" + card("Furniture", "$34", "Confirm your identity to publish"))
         self.assertEqual(page_issue(self.page), "")
@@ -288,6 +312,98 @@ class OldCardBrowserTests(unittest.TestCase):
           '<div role="dialog"><a href="/marketplace/item/9999999/">Roof repair</a></div>')""")
         lc.recover_old_sample_ids(self.page, [listing], 1, self.sleep, lambda _: None)
         self.assertEqual(listing["listingId"], "")
+
+    def install_sample_dialogs(self):
+        self.page.evaluate("""() => {
+          document.querySelectorAll('.card').forEach((card, index) => {
+            card.addEventListener('click', () => {
+              const dialog = document.createElement('div');
+              dialog.setAttribute('role', 'dialog');
+              const link = document.createElement('a');
+              link.href = '/marketplace/item/' + (7000000 + index) + '/';
+              link.textContent = card.querySelector('[data-lp-title]')?.innerText ||
+                card.querySelector('.inner').children[1].innerText;
+              dialog.appendChild(link);
+              dialog.insertAdjacentHTML('beforeend', '<button aria-label="Close">Close</button>');
+              dialog.querySelector('button').onclick = () => dialog.remove();
+              document.body.appendChild(dialog);
+            });
+          });
+        }""")
+
+    def sample_listings(self):
+        cards = self.page.evaluate(lc._READ_CARDS_JS, lc.SECTION_ALL_LISTINGS)
+        return [dict(lc.parse_old_card(c), state=ls.LIVE, listingId="", cardId=c["cardId"],
+                     clicksCount=lc.parse_count(lc.parse_old_card(c)["clicks"]), tab=lc.SECTION_ALL_LISTINGS)
+                for c in cards]
+
+    def discard_card_markers(self):
+        self.page.evaluate("""() => {
+          for (const el of document.querySelectorAll('.card,[data-lp-title]')) {
+            for (const name of el.getAttributeNames()) if (name.startsWith('data-lp-')) el.removeAttribute(name);
+          }
+          // The nearest complete DOM root may be .inner instead of .card.
+          for (const el of document.querySelectorAll('[data-lp-card-id],[data-lp-card],[data-lp-signature]')) {
+            for (const name of el.getAttributeNames()) if (name.startsWith('data-lp-')) el.removeAttribute(name);
+          }
+        }""")
+
+    def test_a_timed_out_click_reply_still_reads_and_closes_the_opened_dialog(self):
+        from unittest import mock
+        self.render("<h1>Your listings</h1>" + card("Lights", "$45") + card("Furniture", "$45"))
+        listings = self.sample_listings()
+        self.install_sample_dialogs()
+        evaluate = self.page.evaluate
+        interrupted = [False]
+
+        def run(expression, arg=None):
+            result = evaluate(expression, arg)
+            if expression == lc._OPEN_SAMPLE_CARD_JS and not interrupted[0]:
+                interrupted[0] = True
+                raise RuntimeError("click reply timed out after the dialog opened")
+            return result
+
+        with mock.patch.object(self.page, "evaluate", side_effect=run):
+            lc.recover_old_sample_ids(self.page, listings, 2, self.sleep, lambda _: None)
+        self.assertEqual([item["listingId"] for item in listings], ["7000000", "7000001"])
+        self.assertEqual(self.page.locator('[role="dialog"]:visible').count(), 0)
+
+    def test_lost_dom_markers_are_rebound_to_a_unique_complete_card(self):
+        self.render("<h1>Your listings</h1>" + card("Lights", "$45") + card("Furniture", "$45"))
+        listings = self.sample_listings()
+        self.discard_card_markers()
+        self.install_sample_dialogs()
+        lc.recover_old_sample_ids(self.page, listings, 2, self.sleep, lambda _: None)
+        self.assertEqual([item["listingId"] for item in listings], ["7000000", "7000001"])
+
+    def test_identical_unmarked_cards_are_not_rebound_by_title_and_price_alone(self):
+        self.render("<h1>Your listings</h1>" + card("Lights", "$45") * 2)
+        listings = self.sample_listings()
+        self.discard_card_markers()
+        self.install_sample_dialogs()
+        lc.recover_old_sample_ids(self.page, listings, 2, self.sleep, lambda _: None)
+        self.assertEqual([item["listingId"] for item in listings], ["", ""])
+        self.assertEqual(self.page.locator('[role="dialog"]:visible').count(), 0)
+
+    def test_a_lost_title_marker_does_not_need_a_slow_locator_text_read(self):
+        self.render("<h1>Your listings</h1>" + card("Lights", "$45"))
+        listings = self.sample_listings()
+        self.page.evaluate("() => document.querySelectorAll('[data-lp-title]').forEach(el => el.removeAttribute('data-lp-title'))")
+        self.install_sample_dialogs()
+        lc.recover_old_sample_ids(self.page, listings, 1, self.sleep, lambda _: None)
+        self.assertEqual(listings[0]["listingId"], "7000000")
+
+    def test_a_recycled_card_with_changed_price_does_not_keep_the_old_identity(self):
+        self.render("<h1>Your listings</h1>" + card("Lights", "$45"))
+        listings = self.sample_listings()
+        self.page.evaluate("""() => {
+          const inner = document.querySelector('.inner');
+          inner.children[2].textContent = '$40';
+        }""")
+        self.install_sample_dialogs()
+        lc.recover_old_sample_ids(self.page, listings, 1, self.sleep, lambda _: None)
+        self.assertEqual(listings[0]["listingId"], "")
+        self.assertEqual(self.page.locator('[role="dialog"]:visible').count(), 0)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,28 @@ class BatchWriteTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         self.assertIn("Sheet not found", message)
 
+    def test_old_deployment_can_save_results_without_optional_help_columns(self):
+        with mock.patch.object(svc, "_requests_retry", side_effect=[
+            FakeResponse({"success": False, "error": "Column not found: Buyer Summary, Next Step, Buyer Search Area"}),
+            FakeResponse({"success": True}),
+        ]) as post:
+            ok, message = svc.update_column_values("Live Checker", 2, {
+                "Visibility": "PARTIAL", "Visibility Details": "US could not check. Retry US.",
+                "Buyer Summary": "US could not check", "Next Step": "Retry US", "Buyer Search Area": "US: not read",
+            })
+        self.assertTrue(ok)
+        self.assertIn("setupSheets", message)
+        self.assertEqual(post.call_args.kwargs["json"]["values"],
+                         {"Visibility": "PARTIAL", "Visibility Details": "US could not check. Retry US."})
+
+    def test_missing_authoritative_column_is_still_a_failed_write(self):
+        with mock.patch.object(svc, "_requests_retry", return_value=FakeResponse({
+            "success": False, "error": "Column not found: Visibility, Buyer Summary",
+        })) as post:
+            ok, _ = svc.update_column_values("Live Checker", 2, {"Visibility": "OK", "Buyer Summary": "Found"})
+        self.assertFalse(ok)
+        post.assert_called_once()
+
 
 class RecheckTests(unittest.TestCase):
     def setUp(self):

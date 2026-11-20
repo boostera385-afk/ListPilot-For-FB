@@ -64,18 +64,18 @@ class RowTests(unittest.TestCase):
     def test_all_found(self):
         values = lv.row_columns(self.targets, {"PK": [lv.SEARCH, lv.SEARCH], "US": [lv.SEARCH, lv.SEARCH]})
         self.assertEqual(values["Visibility"], ls.OK)
-        self.assertEqual(values["PK Check"], "2/2 in search")
+        self.assertEqual(values["PK Check"], "Found in search: 2 of 2 sampled.")
         self.assertIn("Sample: 2 of 2", values["Visibility Details"])
-        self.assertTrue(values["Visibility Details"].endswith("A | ID 1 | PK: SEARCH | US: SEARCH\nB | ID 2 | PK: SEARCH | US: SEARCH"))
+        self.assertTrue(values["Visibility Details"].endswith("A | ID 1 | PK: Found in search | US: Found in search\nB | ID 2 | PK: Found in search | US: Found in search"))
 
     def test_hidden_beats_link_only(self):
         values = lv.row_columns(self.targets, {"PK": [lv.LINK_ONLY, lv.SEARCH], "US": [lv.HIDDEN, lv.SEARCH]})
         self.assertEqual(values["Visibility"], "HIDDEN: 1 result(s)")
-        self.assertEqual(values["US Check"], "1/2 in search, 1 item unavailable")
+        self.assertEqual(values["US Check"], "Found in search: 1 of 2 sampled. 1 item page(s) unavailable.")
 
     def test_link_only_and_gaps(self):
-        self.assertEqual(lv.overall_visibility({"PK": [lv.LINK_ONLY, lv.ERROR]}), "NOT_IN_SEARCH: 1 result(s)")
-        self.assertEqual(lv.overall_visibility({"PK": [lv.SEARCH, lv.ERROR]}), "PARTIAL: 1 result(s) not checked")
+        self.assertEqual(lv.overall_visibility({"PK": [lv.LINK_ONLY, lv.ERROR]}), "PARTIAL: 1 buyer check(s) could not be completed")
+        self.assertEqual(lv.overall_visibility({"PK": [lv.SEARCH, lv.ERROR]}), "PARTIAL: 1 buyer check(s) could not be completed")
         self.assertEqual(lv.overall_visibility({}), "NOT_CHECKED")
 
     def test_skipped_listings_make_ok_partial(self):
@@ -120,11 +120,11 @@ class SearchFirstTests(unittest.TestCase):
 
     def test_summary_and_overall_keep_possible_matches_separate_from_exact_search_hits(self):
         states = [lv.SEARCH, lv.TEXT_MATCH, lv.TEXT_MATCH]
-        self.assertEqual(lv.summarize_checker(states), "1/3 in search, 2 possible by title+price")
-        self.assertTrue(lv.overall_visibility({"PK": states}).startswith("PARTIAL: 2 result(s) matched by title+price"))
+        self.assertEqual(lv.summarize_checker(states), "Found in search: 1 of 3 sampled. 2 similar listing(s); seller not confirmed.")
+        self.assertTrue(lv.overall_visibility({"PK": states}).startswith("PARTIAL: 2 similar listing(s)"))
         self.assertEqual(lv.overall_visibility({"PK": [lv.SEARCH, lv.SEARCH]}), "OK")
-        self.assertEqual(lv.overall_visibility({"PK": [lv.NOT_FOUND, lv.SEARCH]}), "PARTIAL: 1 result(s) not checked")
-        self.assertIn("1 no match (no ID)", lv.summarize_checker([lv.SEARCH, lv.NOT_FOUND]))
+        self.assertEqual(lv.overall_visibility({"PK": [lv.NOT_FOUND, lv.SEARCH]}), "PARTIAL: 1 buyer check(s) could not be completed")
+        self.assertIn("1 no confirmed match; listing ID missing", lv.summarize_checker([lv.SEARCH, lv.NOT_FOUND]))
 
     def test_listing_verdict_puts_search_visibility_first(self):
         self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.SEARCH]), "Visible in search")

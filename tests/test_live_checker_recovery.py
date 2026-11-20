@@ -255,6 +255,61 @@ class LaunchRecoveryTests(unittest.TestCase):
         self.assertEqual(post["_live_check"], "STOPPED")
 
 
+class StopConfirmationTests(unittest.TestCase):
+    profile = "6645144d-c5da-4451-8d16-2fa50488ea42"
+
+    def setUp(self):
+        self.resolve = mock.patch.object(im, "resolve_profile_id", return_value=self.profile)
+        self.resolve.start()
+        self.addCleanup(self.resolve.stop)
+        self.sleep = mock.patch.object(im.time, "sleep")
+        self.sleep.start()
+        self.addCleanup(self.sleep.stop)
+        self.addCleanup(im._launch_attempts.pop, self.profile, None)
+        self.addCleanup(im._uncertain_launches.discard, self.profile)
+
+    def test_stop_error_is_success_only_after_exact_profile_closure_is_verified(self):
+        with mock.patch.object(im, "_api_request", side_effect=[
+            response({"status": "error", "message": "not running"}),
+            response({"status": "Stopping"}), response({"status": "Ready"}),
+        ]) as request, mock.patch.object(im, "_profile_cdp_candidates", return_value=[]):
+            self.assertTrue(im.stop_profile(self.profile))
+        self.assertEqual(sum(call.args[1].startswith("/profile/stop/") for call in request.call_args_list), 1)
+        self.assertFalse(request.call_args_list[0].kwargs["retry"])
+
+    def test_transport_failure_does_not_lose_a_verified_shutdown(self):
+        with mock.patch.object(im, "_api_request", side_effect=[
+            RetryableError("stop reply timed out"), response({"status": "Ready"}),
+        ]), mock.patch.object(im, "_profile_cdp_candidates", return_value=[]):
+            self.assertTrue(im.stop_profile(self.profile))
+
+    def test_success_reply_with_a_still_running_browser_is_not_confirmation(self):
+        with mock.patch.object(im, "_api_request", return_value=response({"status": "Ready"})), \
+             mock.patch.object(im, "_profile_cdp_candidates", return_value=["http://127.0.0.1:9222"]):
+            self.assertFalse(im.stop_profile(self.profile))
+
+    def test_unknown_provider_status_does_not_prove_shutdown(self):
+        with mock.patch.object(im, "_api_request", return_value=response({"status": "unknown"})), \
+             mock.patch.object(im, "_profile_cdp_candidates", return_value=[]):
+            self.assertFalse(im.stop_profile(self.profile))
+
+    def test_ownership_state_is_cleared_only_after_confirmed_shutdown(self):
+        attempt = im._LaunchAttempt(attached=True)
+        attempt.done.set()
+        im._launch_attempts[self.profile] = attempt
+        im._uncertain_launches.add(self.profile)
+        with mock.patch.object(im, "_api_request", return_value=response({"status": "ok"})), \
+             mock.patch.object(im, "_confirm_profile_stopped", return_value=False):
+            self.assertFalse(im.stop_profile(self.profile))
+        self.assertTrue(attempt.attached)
+        with mock.patch.object(im, "_api_request", return_value=response({"status": "ok"})), \
+             mock.patch.object(im, "_confirm_profile_stopped", return_value=True):
+            self.assertTrue(im.stop_profile(self.profile))
+        self.assertTrue(attempt.stopped)
+        self.assertFalse(attempt.attached)
+        self.assertNotIn(self.profile, im._launch_attempts)
+
+
 class CdpDiscoveryTests(unittest.TestCase):
     profile = "6645144d-c5da-4451-8d16-2fa50488ea42"
 

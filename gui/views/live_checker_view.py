@@ -11,6 +11,10 @@ from core.automation.live_checker import run_live_checker_flow, LIVE_CHECKER_SHE
 from core.automation.listing_status import format_counts, format_duration, other_count
 from core.automation.visibility_checker import configured_checkers, run_visibility_checks, buyer_options, validate_checker_roles
 from core.automation import listing_visibility as lv
+from core.automation import listing_dates as ld
+from core.automation import issues as iss
+from core.config import get_setting, set_setting
+import dataclasses
 from core.engine.automation_control import AutomationControl
 from core.engine.exceptions import AutomationStopped
 from core.utils.app_logger import log_event
@@ -40,8 +44,8 @@ MODE_HELP = {
 BUYER_COLUMNS = ("Profile", "Listing", "Price", "PK", "US", "Verdict")
 BUYER_WEIGHTS = (3, 5, 2, 3, 3, 4)
 
-RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Duplicates", "Other", "Total", "PK", "US", "Visibility")
-RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 2, 3, 3, 3)
+RESULT_COLUMNS = ("Profile", "Result", "Live", "Pending", "Rejected", "Duplicates", "Other", "Total", "PK", "US", "Visibility", "Next step")
+RESULT_WEIGHTS = (4, 3, 2, 2, 2, 2, 2, 2, 4, 4, 3, 5)
 
 
 def _parse_concurrency(value, default=3):
@@ -172,6 +176,16 @@ class LiveCheckerView(ctk.CTkFrame):
         self.mode_help = ctk.CTkLabel(mode_box, text=MODE_HELP["new"], font=theme.font(11),
                                       text_color=theme.TEXT_MUTED, anchor="w", wraplength=275, justify="left")
         self.mode_help.grid(row=2, column=0, sticky="w")
+        ctk.CTkLabel(mode_box, text="Listed within", font=theme.font(12), text_color=theme.TEXT_MUTED,
+                     anchor="w").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        saved_window = ld.normalize_window(get_setting("live_check_listed_window", ld.ANY))
+        self.window_var = ctk.StringVar(value=ld.WINDOWS[saved_window])
+        self.window_menu = ctk.CTkOptionMenu(
+            mode_box, variable=self.window_var, values=list(ld.WINDOWS.values()), width=150, height=32,
+            fg_color=theme.SURFACE_ALT, button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            text_color=theme.TEXT, font=theme.font(12), command=self._on_window_change,
+        )
+        self.window_menu.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(2, 2))
         self.run_info = ctk.CTkLabel(card, text="Ready · Quick buyer sample: up to 3 listings per seller",
                                      font=theme.font(11), text_color=theme.TEXT_MUTED, anchor="w",
                                      justify="left", wraplength=900)
@@ -249,13 +263,12 @@ class LiveCheckerView(ctk.CTkFrame):
             tab.grid_rowconfigure(0, weight=1)
         self.table = ResultsTable(
             self.tabs.tab("Results"), RESULT_COLUMNS, RESULT_WEIGHTS, min_width=940,
-            wraplengths=(120, 85, 35, 45, 50, 60, 40, 40, 100, 100, 85),
+            wraplengths=(120, 85, 35, 45, 50, 60, 40, 40, 140, 140, 110, 200),
             display_formatters={"Visibility": lv.visibility_label, "Result": lambda code: {
-                "OK": "Scanned", "PARTIAL": "Partial scan", "CHECKPOINT": "Account check",
-                "LAYOUT_UNKNOWN": "Layout unread", "LOGGED_OUT": "Login needed",
-                 "PROFILE_START_FAILED": "Launch failed", "OWNER_OFF": "Owner off",
-                 "SHEET_WRITE_FAILED": "Not saved to Sheets",
-            }.get(str(code), str(code))},
+                "OK": "Scanned", "PARTIAL": "Partial scan",
+                "LAYOUT_UNKNOWN": "Layout unread", "OWNER_OFF": "Owner off",
+                "SHEET_WRITE_FAILED": "Not saved to Sheets",
+            }.get(str(code)) or (iss.label(code) if iss.is_issue(code) else str(code))},
         )
         self.table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
         # One row per sampled listing: was it found by searching Marketplace as a buyer?
@@ -270,6 +283,12 @@ class LiveCheckerView(ctk.CTkFrame):
         self.tabs.set("Log")
 
     # --- Small UI helpers ------------------------------------------------------------
+    def _on_window_change(self, label):
+        try:
+            set_setting("live_check_listed_window", ld.normalize_window(label))
+        except Exception:
+            pass  # the choice still applies to this run
+
     def _on_mode_change(self, label):
         key = next((k for k, v in MODE_LABELS.items() if v == label), "new")
         self.mode_help.configure(text=MODE_HELP[key])
@@ -407,6 +426,8 @@ class LiveCheckerView(ctk.CTkFrame):
         buyers.update(post.get("_visibility_cols") or {})
         if code == "OWNER_OFF":
             buyers = lv.owner_buyer_columns(self.run_options, has_live=True)
+        if iss.is_issue(code) and not post.get("_visibility_cols"):
+            buyers["Next Step"] = iss.next_step(code)  # proxy/login/block: say exactly what to fix
         self.table.upsert(post.get("rowNumber") or _profile_name(post), {
             "Profile": _profile_name(post),
             "Result": code.split(":")[0],
@@ -417,6 +438,7 @@ class LiveCheckerView(ctk.CTkFrame):
             "Other": other_count(counts) if verified else "—",
             "Total": sum(counts.values()) if verified else "—",
             "PK": buyers["PK Check"], "US": buyers["US Check"], "Visibility": buyers["Visibility"],
+            "Next step": buyers.get("Next Step", ""),
         }, colors={"Result": theme.status_color(code), "Live": theme.GREEN,
                    "Pending": theme.AMBER, "Rejected": theme.RED, "Other": theme.AMBER})
         self.stats["profiles"].set(self.done_count)
@@ -440,13 +462,15 @@ class LiveCheckerView(ctk.CTkFrame):
             if not values:
                 continue
             code = values.get("Visibility", "")
-            if code != "OK" or post.get("_visibility_saved") is False:
+            if code != "OK" or post.get("_visibility_saved") is False or post.get("_cleanup_issues"):
                 self.visibility_issues += 1
             pk = values.get(lv.checker_column("PK"), "—")
             us = values.get(lv.checker_column("US"), "—")
             self.table.upsert(post.get("rowNumber") or _profile_name(post), {
                 "PK": pk, "US": us, "Visibility": code if post.get("_visibility_saved") is not False else "Not saved to Sheets",
-            }, colors={"Visibility": theme.status_color(code)})
+                "Next step": values.get("Next Step", ""),
+            }, colors={"Visibility": theme.status_color(code),
+                       "Next step": theme.AMBER if post.get("_cleanup_issues") else theme.TEXT})
             self._show_buyer_rows(post)
         self.stats["hidden"].set(self.visibility_issues)
         self.buyer_summary.configure(text=lv.summarize_buyer_rows(
@@ -457,7 +481,7 @@ class LiveCheckerView(ctk.CTkFrame):
         for index, item in enumerate(post.get("_buyer_rows") or []):
             states = [item[label] for label in ("PK", "US") if label in item]
             verdict = lv.listing_verdict(states)
-            color = (theme.GREEN if verdict.startswith("Visible in search")
+            color = (theme.GREEN if verdict == "Visible in search"
                      else theme.RED if verdict.startswith("Item unavailable") else theme.AMBER)
             self.buyer_table.upsert(f"{post.get('rowNumber') or _profile_name(post)}-{index}", {
                 "Profile": _profile_name(post),
@@ -473,7 +497,8 @@ class LiveCheckerView(ctk.CTkFrame):
         if self.is_processing or (self.engine and self.engine.is_running):
             return
 
-        self.run_options = buyer_options()
+        self.run_options = dataclasses.replace(buyer_options(),
+                                               listed_window=ld.normalize_window(self.window_var.get()))
         self._reset_dashboard()
 
         concurrency, concurrency_warning = _parse_concurrency(self.concurrency.get())
@@ -587,8 +612,12 @@ class LiveCheckerView(ctk.CTkFrame):
 
         concurrency = min(concurrency, len(posts))
         self._phase = "Owner scan"
+        window = ld.normalize_window(self.run_options.listed_window)
+        scope = ("Owner counts still include every listing." if window == ld.ANY else
+                 f"Listed within '{ld.WINDOWS[window]}': counts and buyer samples only include listings "
+                 "posted in that window (day-only dates are matched by day).")
         logger_proxy(f"Buyer plan: {', '.join(label for label, _ in self.run_options.checkers) or 'Off'}; "
-                     f"up to {self.run_options.limit} live listings per seller. Owner counts still include every listing.")
+                     f"up to {self.run_options.limit} live listings per seller. {scope}")
         logger_proxy(f"Found {len(posts)} profiles to check. Using concurrency: {concurrency}")
 
         self.success_count = 0
@@ -667,7 +696,11 @@ class LiveCheckerView(ctk.CTkFrame):
                                              progress=progress, options=self.run_options,
                                              detail=lambda *args: run_on_ui(self._buyer_detail, *args))
             if summary:
-                logger_proxy("Visibility: " + ", ".join(f"{n} {c}" for c, n in sorted(summary.items())))
+                for post in posts:
+                    values = post.get("_visibility_cols") or {}
+                    if values:
+                        logger_proxy(f"{_profile_name(post)} — {values.get('Buyer Summary', lv.visibility_label(values.get('Visibility', '')))}")
+                        logger_proxy(f"Next step: {values.get('Next Step', 'Review the buyer results.')}")
                 notes = any(code != "OK" for code in summary) or any(
                     post.get("_visibility_saved") is False for post in posts)
                 run_on_ui(self.step2.finish, "Sample complete" + (" · see results" if notes else ""),

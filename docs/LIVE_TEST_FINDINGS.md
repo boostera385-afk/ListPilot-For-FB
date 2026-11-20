@@ -157,3 +157,77 @@ shown to be banned or globally hidden. The buyer pass took **153 seconds**,
 including buyer startup; the actual saved city/radius still needs checking near
 the listing location before drawing a local-search conclusion. No sheet cells
 or history rows were changed during this verification.
+
+## 11. November 20 follow-up: readable results and incomplete US checks
+
+The next user run preserved the owner totals (118 live, 7 rejected), but one
+seller dialog stayed open after its first ID was read. The safe stale-dialog
+guard then skipped two IDs. PK could only report possible title/price matches
+for those two listings. All US search results were unreadable, yet the overall
+cell said `NOT_IN_SEARCH`, obscuring the incomplete US checks.
+
+Changes:
+- Close supports native buttons as well as role buttons, retries Escape, and
+  waits for the dialog to actually disappear before the next card.
+- Search reads the landmark containing result cards, not a filters-only first
+  main landmark. It allows a city redirect to settle and waits longer for slow
+  results. A persistent unread search saves diagnostics once per buyer.
+- Unfinished buyer checks now take precedence over search misses. All-unread
+  results say **Could not check any of 3 listings**, never a misleading `0/3` score.
+- Plain **Buyer Summary**, **Next Step**, and **Buyer Search Area** columns are
+  created next to Profile Name by the updated setup script. The app also shows
+  Next step; details/logs use readable words. Old deployments still save the
+  core results and retain the same guidance in Visibility Details.
+
+Live read-only re-test: seller `19 june id 6` again read 64 live, 2 rejected,
+and recovered all three selected IDs, without stale-dialog skips. The US buyer
+completed all three checks: each exact item link opened, none of the IDs was
+observed in the sampled search. Its displayed search area was **McKinney,
+Texas — within 20 mi**. This does not establish the cause of every earlier
+unread search or rule out future network/markup problems. Sheet/history writes
+were not sent; the new live layout still requires setup and redeployment.
+
+Validation: 236 Python tests and the Apps Script schema tests passed.
+
+## 12. November 20 follow-up: interrupted card opening and shutdown confirmation
+
+The user's next run still counted 118 live and 7 rejected, but seller 6 lost all
+three sample IDs: a title locator timed out, then a card click timed out after
+opening its dialog. The `opened` flag was only set after a successful click
+reply, so the interrupted click skipped cleanup. Subsequent targets then hit
+the stale-dialog guard. Two buyer shutdowns were also reported as unconfirmed.
+
+Fixes:
+- Card title validation and opening now happen in one browser round trip,
+  rather than separate count/text/click calls across Facebook rerenders.
+- Lost card markers can be refreshed only against a unique complete seller
+  snapshot. Identical ambiguous snapshots are not rebound by title/price.
+- An interrupted opening reply may still have opened the dialog: read its exact
+  link and always attempt verified cleanup before the next target. Recovery is
+  time-bounded and logs how many selected links are ready.
+- Missing seller IDs now produce **Seller link missing — retry the seller scan**.
+  Buyer searches and browser launches are skipped for ID-less samples, even
+  when a common title and price are available. Legacy possible-match helpers
+  remain, but current buyer runs do not use lookalikes to identify a seller.
+- Incogniton shutdown requests are serialized and followed by a bounded
+  provider-status/exact-profile-process check. A failed stop reply can still
+  be confirmed closed; an OK reply with a browser still running is not success.
+  A real cleanup problem is preserved in Next Step without losing good listing
+  results, including if the run was stopped.
+
+Full live read-only re-test, with both sellers concurrent and PK/US concurrent:
+
+| Check | Observed result |
+|---|---|
+| Seller 6 | 64 live, 2 rejected; 3/3 sample IDs recovered |
+| Seller 7 | 54 live, 5 rejected; 3/3 sample IDs recovered |
+| Buyer outcomes | All 12 checks opened the exact item link; none found the ID in the bounded local search |
+| PK search area | Los Angeles, California — within 60 mi |
+| US search area | McKinney, Texas — within 20 mi |
+| Buyer pass duration | 140 seconds, including browser startup and verified shutdown |
+| Browser cleanup | All four profiles Ready with zero matching CDP browser processes; no cleanup warnings |
+
+This is not evidence of global hiding or an account ban. No sheet/history
+writes were sent during verification. The existing deployed explanation columns
+can display these changes on the next app run; this follow-up needs no new
+sheet columns. Validation: **249 Python tests and Apps Script schema tests passed**.

@@ -28,7 +28,7 @@ TIMEOUT = "TIMEOUT"
 
 # Reasons that are worth one automatic retry (a slow or half-loaded page).
 # Logged out, checkpoint, language and "no listings" are never retried.
-RETRYABLE_CODES = (TIMEOUT, LAYOUT_UNKNOWN)
+RETRYABLE_CODES = (TIMEOUT, LAYOUT_UNKNOWN, "PROXY_ERROR", "NETWORK_ERROR", "PAGE_TIMEOUT", "BROWSER_CLOSED")
 
 # Order used when listing counts in summaries.
 STATUS_ORDER = (LIVE, PENDING, REJECTED, ACTION_REQUIRED, REMOVED, EXPIRED, SOLD, DRAFT, UNKNOWN)

@@ -12,7 +12,7 @@ One sheet row = one browser profile. For each pending row the app:
 
 1. Claims the row, starts the profile, connects over CDP.
 2. Opens `facebook.com/marketplace/seller/listings/`.
-3. Stops early on `LOGGED_OUT` or `CHECKPOINT` (checkpoints are never retried, to avoid triggering more checks).
+3. Stops early on an account problem (`LOGGED_OUT`, `TWO_FACTOR`, `CHECKPOINT`, `TEMP_BLOCKED`, `ACCOUNT_DISABLED`); these are never retried, to avoid triggering more checks. A remembered "Continue as <name>" prompt is clicked once; no password is ever typed.
 4. Reads the Messenger unread badge -> `Responses`.
 5. Reads listings, trying in order:
    1. **New table** (`Your listings` with status tabs)
@@ -34,6 +34,7 @@ Random delays (1.5-3.5 s) separate navigation steps.
 - If fewer rows are read than a tab's badge claims, a tab is skipped or cannot be opened, or some listings have an unrecognised status (usually a non-English account), `Check Result` becomes `PARTIAL: ...`.
 - A **240 s** budget per profile (`SCAN_BUDGET_SECONDS`) stops a slow account from holding a worker.
 - Older Facebook pages can show an enabled **Clear filters** button even in the default view. The checker resets it once and checks remaining search/filter indicators; it no longer rejects the page just because Clear remains visible. Failed scans report an **unknown** listing count, not zero.
+- Seller sample dialogs are closed with either a native button or Escape, and dismissal is verified before opening the next card. A slow close animation no longer silently drops the remaining sample IDs.
 
 ## 3. Listing statuses
 
@@ -54,8 +55,19 @@ Rules (`classify_status`): the row's own status/notice text wins; the tab label 
 | `NO_LISTINGS` | Table empty / "start selling" |
 | `LAYOUT_UNKNOWN` | Page loaded but matches no known layout |
 | `TIMEOUT` | Blank page / nothing loaded |
+| `PROXY_ERROR` | Chrome error page from the proxy (SOCKS/PROXY/TUNNEL) — check the profile's proxy |
+| `NETWORK_ERROR` | No connection / DNS / reset |
+| `PAGE_TIMEOUT` | Facebook did not answer in 30s |
+| `TWO_FACTOR` | Login code / approval required |
+| `TEMP_BLOCKED` | "You're temporarily blocked" / "going too fast" — pause this account |
+| `ACCOUNT_DISABLED` | Account disabled, suspended or restricted |
+| `PROFILE_START_FAILED` | Incogniton could not open the profile |
+| `PROFILE_PROXY_FAILED` | Incogniton could not open the profile because of its proxy |
+| `BROWSER_CLOSED` | The profile window was closed during the check |
 
-`TIMEOUT` and `LAYOUT_UNKNOWN` are retried once with a fresh page before anything is written; the other codes are never retried. `NO_LISTINGS` zeroes the count columns so old numbers do not look current.
+Every code also fills **Buyer Summary** and **Next Step** with plain words (`core/automation/issues.py`). Buyer columns use the same codes per region, e.g. "US buyer could not finish (proxy connection failed)". Connection codes are waited on (5s, 10s) and retried before they are reported.
+
+`TIMEOUT`, `LAYOUT_UNKNOWN` and the connection codes (`PROXY_ERROR`, `NETWORK_ERROR`, `PAGE_TIMEOUT`, `BROWSER_CLOSED`) are retried once with a fresh page before anything is written; account codes are never retried. `NO_LISTINGS` zeroes the count columns so old numbers do not look current.
 
 Failure text includes the final URL, page language and the screenshot filename.
 
@@ -94,6 +106,15 @@ Re-check modes only clear `Status` on finished rows, then the normal pending fet
 
 At the end of a run the log shows total listings by status and profiles with problems by code.
 
+### Listed within (posted-date window)
+
+The **Listed within** dropdown (Any time, Last 12 hours, Last 24 hours, Today, Yesterday, Last 2 days, Last 7 days) limits the saved counts and the buyer sample to listings posted in that window. The choice is remembered in `config.json` (`live_check_listed_window`) and snapshotted per run.
+
+- Older seller cards show day-only dates (`Listed on 20/11` or `Listed on 11/18`, depending on the account locale). Day/month order is inferred per profile from any date with a part above 12; a date that is still ambiguous is only kept or dropped when both readings agree.
+- A day-only date that partly overlaps the window (e.g. yesterday vs "Last 24 hours") is kept and counted as approximate. Listings without a readable date are left out and counted. `Status Summary` starts with e.g. `Listed within Last 24 hours: 4 of 38 listings (...)`.
+- The newer table usually shows no posted date; a window then keeps nothing and the log says to use **Any time** for that profile.
+- Live History is not appended for windowed runs, so trend history stays full-account.
+
 ---
 
 ## 6a. Visibility check (PK + US checker accounts)
@@ -102,14 +123,14 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 
 - Set them in **Settings -> Live Checker - Checker Profiles**: one Pakistani account, one USA account with a confirmed location. Empty = step skipped.
 - Each checker profile opens **once** per run (browser startup is serialized, checks then run in parallel) and, for every sampled target (max 15 per owner row):
-   1. searches Marketplace by the title (reads the initial results and two scrolls), then tries a shortened, normalized keyword query if the title search misses and the keywords differ. Every query still looks for the **exact listing ID**. A listing with no ID is matched only on the exact title **and** exact price shown on a result card, and remains identity-unverified;
+   1. searches Marketplace by the title (reads the initial results and two scrolls), then tries a shortened, normalized keyword query if the title search misses and the keywords differ. Every query still looks for the **exact listing ID**. A listing with no exact seller link is **not searched**; it reports **Seller link missing — retry the seller scan**;
   2. if an ID listing is not in the results, opens `marketplace/item/<ID>` to tell "opens by link" from "unavailable". A listing with no ID has no link to try.
 - **Search is the verdict.** A listing counts as visible only if it shows in search; opening by link never counts as visible.
-- Identical listings with no ID (same title and price) each need their own result card, so one card cannot prove two listings. When a listing is not found, the log shows what the search returned.
+- Identical title/price listings from other sellers cannot verify this seller. Current runs skip targets without exact IDs instead of spending buyer searches on lookalike cards. Older reports may contain `TEXT_MATCH` / `NOT_FOUND`; those were never verified search hits.
 - The sample takes listings with an ID first, then different title + price combinations before repeats. The PK and US buyers run side by side, so the pass takes about as long as one buyer.
-- On older seller cards without links, the checker opens only the selected buyer-sample cards and reads each card's own title-matching item link from its dialog. Ambiguous/missing links stay unverified. This identity check runs even when optional date/details reads are off.
+- On older seller cards without links, the checker opens only the selected buyer-sample cards and reads each card's own title-matching item link from its dialog. Opening validates and dispatches in one browser round trip, avoiding a stale title locator after scrolling. Missing DOM markers are refreshed only against a unique full card snapshot. A click-reply error is treated as possibly opened: read and close its dialog before continuing. Ambiguous/missing links stay unverified. This identity check runs even when optional date/details reads are off.
 - A profile named twice in the queue is checked once; the later row gets `Skipped: same profile as row N`.
-- Results per listing: `SEARCH` (exact listing ID observed in search), `TEXT_MATCH` (possible title+price match, not verified), `NOT_FOUND` (no match in the search sample, no ID), `LINK_ONLY` (exact item page opens but was not seen in the search sample), `HIDDEN` (exact item page showed unavailable), `UNCLEAR`, and account/network/error states. Only `SEARCH` counts as verified search visibility.
+- Results per listing: `SEARCH` (exact ID observed in search), `ID_MISSING` (seller link missing; buyer skipped), `LINK_ONLY` (exact item page opens but was not seen in the search sample), `HIDDEN` (exact item page showed unavailable), `UNCLEAR`, and account/network/error states. Only `SEARCH` counts as verified search visibility.
 - Columns written: `PK Check`, `US Check` (e.g. `3/4 in search, 1 link only`), `Visibility` (`OK`, `HIDDEN: n`, `NOT_IN_SEARCH: n`, `PARTIAL: ...`), `Visibility Details` (one line per listing), `Visibility Checked`.
 - `PK vs US` is inserted immediately after `US Check` by `setupSheets` without clearing existing rows. It compares the same sampled listings: **Same** (matching outcomes, even if both missed), **Different** (some outcomes differ), **Incomplete** (missing results, login/network errors), or **Not compared** (one buyer disabled/no sample). Counts say how many listings agree/differ. Title+price hits retain an identity-unverified warning. Existing rows populate on the next check, not during setup.
 - Search depends on the saved Marketplace city/radius and account personalisation, not merely a PK/US label. `LINK_ONLY` never counts as search visibility. Unavailable item pages are not proof of an account ban.
@@ -122,11 +143,30 @@ The owner profile only tells us what Facebook shows *the seller*. To confirm a b
 - **Settings → Scan seller / owner profile** defaults to on. Turn it off to run only the enabled PK/US buyers. Previous seller counts and owner timestamps remain untouched.
 - For owner-off runs, enter **Buyer Listing Targets** in each seller row, one listing per line: `Exact listing title | https://www.facebook.com/marketplace/item/123456789/`. A numeric listing ID after `|` also works. Titles containing `|` are supported. Empty/malformed rows stay pending; old counts/details are not silently reused as current targets.
 - Run `setupSheets` and redeploy the latest Apps Script for this new input column. Restart ListPilot. Settings affect the next run.
-- Only an exact listing ID observed on the requested Marketplace search page counts as **In search**. Title+price matches remain **possible matches**, excluded from verified search counts and regional agreement.
+- Only an exact listing ID observed on the requested Marketplace search page counts as **In search**. Missing IDs require a seller-scan retry; they are not a buyer-account failure and are never filled from another seller's similar title/price.
 - Visible result cards are read from the search content, excluding hidden cards, dialogs, navigation and recognised recommendation sections. Redirected queries, unloaded results, and failed scrolls remain unverified.
 - A bounded search sample cannot prove a listing is globally absent. **Link only** means its exact item page opens but it was not seen in the sampled search. Item-page fallback requires the correct URL and primary heading; unrelated body text and redirected error pages do not verify it.
 - PK/US are configured account labels, not independent proof of country/IP or Marketplace location. Verify the saved city/radius yourself; search results are personalised. The app does not change geography or bypass sign-in/checkpoints.
 - **ZIP codes are not location filters when typed into the keyword query.** Set the buyer's actual Marketplace city/ZIP and radius near the listing before a local visibility test. Keyword fallback broadens the sampled search, not the geography; it cannot establish country-wide visibility or prove a global absence.
+
+### Reading the results without technical codes
+
+- **Live Count** is the seller-side count. It is separate from the small buyer sample.
+- **PK Check / US Check** now use full sentences: `Found in search: 2 of 3 sampled. 1 link(s) open; not seen in search.` If all searches fail, the cell says **Could not check any of 3 listings**, not `0/3`.
+- **Buyer Summary** explains what happened. A failed buyer takes precedence over another buyer's search misses, so the overall result becomes **Check incomplete**, not simply "not in search".
+- **Next Step** says which buyer to open/retry, when exact seller links are missing, and when to review the saved city/ZIP and radius.
+- **Buyer Search Area** records the city/radius visibly shown in Marketplace, when readable. PK and US are account labels, not proof of geography.
+- Browser shutdown is serialized for Incogniton, then verified against the provider's status and exact-profile browser processes. An error/timeout reply alone does not prove the browser stayed open. If closure remains unconfirmed, **Next Step** says which buyer to close manually; completed listing results are preserved, including on a stopped run.
+- Per-listing **Visibility Details** use the same plain words as the app. The internal `Visibility` code remains for filtering and compatibility.
+- A planned sample that passes is displayed as **Sample passed — other listings not checked**, not as a failed buyer check.
+
+To add the three new explanatory columns next to Profile Name, paste the latest
+`core/assets/apps_script.js` into Apps Script, run **setupSheets**, and deploy a
+new version. Existing data/formulas and custom header notes are preserved. The
+Live Checker rows are taller so explanations are readable. Until redeployed,
+the app still saves the existing result columns, with plain guidance in
+Visibility Details, and logs a reminder to update the script. Re-check rows to
+refresh their wording; formatting alone does not rewrite old observations.
 - An explicit zero-listing scan is successful, not a startup error. Read-but-unsaved scans report `SHEET_WRITE_FAILED`; buyer save/cleanup failures cannot silently erase good results. Failed-profile recheck includes incomplete/stopped buyer passes.
 - Temporary Incogniton sync/start states get a brief readiness wait before a single launch. A leftover browser is not relaunched just because the API says Ready. Connection refusal fails quickly; an ambiguous request timeout is never blindly replayed.
 

@@ -65,6 +65,7 @@ assert.ok(us > 0);
 assert.equal(headers[us + 1], "PK vs US");
 assert.equal(headers[us + 2], "Visibility");
 assert.ok(headers.includes("Buyer Listing Targets"), "buyer-only mode needs explicit target input");
+assert.deepEqual(headers.slice(0, 5), ["ID", "Profile Name", "Buyer Summary", "Next Step", "Buyer Search Area"]);
 context.ensureAutoColumns_(fresh);
 assert.deepEqual(fresh.rows[0], headers, "setup is idempotent");
 
@@ -75,4 +76,12 @@ assert.equal(reordered.insertions.length, 0, "never duplicate a user-reordered e
 const other = new FakeSheet([["ID", "US Check", "Notes"]], "FB Listings");
 assert.equal(context.ensureColumn_(other, "PK vs US"), 4);
 assert.equal(other.insertions.length, 0, "special insertion belongs only to Live Checker");
+const withData = new FakeSheet([
+  ["ID", "Profile Name", "Status", "Custom formula"],
+  ["seller-id", "Seller", "Success", "=1+1"],
+]);
+context.ensureAutoColumns_(withData);
+assert.equal(withData.rows[1][withData.rows[0].indexOf("Custom formula")], "=1+1");
+assert.equal(withData.rows[1][withData.rows[0].indexOf("Status")], "Success");
+assert.deepEqual(withData.rows[1].slice(0, 5), ["seller-id", "Seller", "", "", ""]);
 console.log("Apps Script region comparison schema tests passed.");

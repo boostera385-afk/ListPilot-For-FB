@@ -6,6 +6,7 @@ from core.engine.exceptions import SheetsUnavailableError
 
 
 _RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+_OPTIONAL_BUYER_COLUMNS = {"Buyer Summary", "Next Step", "Buyer Search Area"}
 
 
 def _friendly_connection_error(error):
@@ -159,6 +160,16 @@ def update_column_values(sheet_name, row_number, values):
     try:
         response = _requests_retry("post", url, json=payload, timeout=20)
         ok, message = _status_update_result(response, "Columns updated")
+        if not ok and str(message).startswith("Column not found:"):
+            missing = {name.strip() for name in str(message).split(":", 1)[1].split(",")}
+            if missing and missing <= _OPTIONAL_BUYER_COLUMNS:
+                # Older deployments can still save the authoritative results.
+                # Plain guidance also lives in Visibility Details, so no result is hidden.
+                essential = {name: value for name, value in values.items() if name not in _OPTIONAL_BUYER_COLUMNS}
+                saved, reason = update_column_values(sheet_name, row_number, essential)
+                if saved:
+                    return True, "Saved results. Update Apps Script and run setupSheets to add the easy-to-read buyer columns."
+                return saved, reason
         if ok or "invalid action" not in str(message).lower():
             return ok, message
     except requests.exceptions.RequestException as e:

@@ -421,12 +421,13 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         logs = []
         with mock.patch.object(lv, "FB_SEARCH", self.base + "/buyer/marketplace/search/?query={query}&exact=false"),                 mock.patch.object(lv, "FB_ITEM", self.base + "/buyer/marketplace/item/{id}/"),                 mock.patch.object(vc, "MARKETPLACE_HOME", self.base + "/buyer/marketplace/"):
             results = vc.check_listings(self.debug_url, "PK", targets, logs.append, lambda seconds: None)
-        self.assertEqual(results, [lv.SEARCH, lv.TEXT_MATCH, lv.NOT_FOUND, lv.LINK_ONLY, lv.HIDDEN], logs[-6:])
+        self.assertEqual(results, [lv.SEARCH, lv.ID_MISSING, lv.ID_MISSING, lv.LINK_ONLY, lv.HIDDEN], logs[-6:])
         self.assertEqual(lv.summarize_checker(results),
-                         "1/5 in search, 1 possible by title+price, 1 link only, 1 no match (no ID), 1 item unavailable")
+                         "Found in search: 1 of 5 sampled. 1 link(s) open; not seen in search. "
+                         "1 item page(s) unavailable. 2 not checked; exact seller link missing.")
         self.assertTrue(lv.overall_visibility({"PK": results}).startswith("HIDDEN"))
 
-    def test_identical_listings_without_ids_need_one_result_card_each(self):
+    def test_listings_without_ids_are_not_searched_as_if_the_seller_were_known(self):
         from core.automation import listing_visibility as lv
         from core.automation import visibility_checker as vc
 
@@ -437,11 +438,9 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         with mock.patch.object(lv, "FB_SEARCH", self.base + "/buyer/marketplace/search/?query={query}&exact=false"),                 mock.patch.object(lv, "FB_ITEM", self.base + "/buyer/marketplace/item/{id}/"),                 mock.patch.object(vc, "MARKETPLACE_HOME", self.base + "/buyer/marketplace/"):
             results = vc.check_listings(self.debug_url, "PK", [one_card, one_card, two_cards, two_cards, two_cards],
                                         logs.append, lambda seconds: None)
-        # One card cannot prove two identical listings; two cards prove two, not three.
-        self.assertEqual(results, [lv.TEXT_MATCH, lv.NOT_FOUND, lv.TEXT_MATCH, lv.TEXT_MATCH, lv.NOT_FOUND], logs[-6:])
-        self.assertTrue(any("not seen in sampled search (saw:" in line for line in logs))
-        # Repeated listings share one page load per search: 5 targets, 2 distinct searches.
-        self.assertEqual(sorted(SEARCH_HITS), ["Gutter clean", "Hedge trim"])
+        self.assertEqual(results, [lv.ID_MISSING] * 5, logs[-6:])
+        self.assertTrue(any("seller links are missing" in line for line in logs))
+        self.assertEqual(SEARCH_HITS, [], "a lookalike result cannot verify the sampled seller")
 
     def test_older_layout_reads_every_card_of_a_slow_infinite_feed(self):
         import time as _time

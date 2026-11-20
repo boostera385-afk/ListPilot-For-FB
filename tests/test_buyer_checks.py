@@ -61,7 +61,7 @@ class BuyerRuntimeTests(unittest.TestCase):
         start.assert_not_called()
         values = posts[0]["_visibility_cols"]
         self.assertEqual(values["US Check"], "Off")
-        self.assertIn("unverified", values["PK Check"])
+        self.assertIn("seller links are missing", values["PK Check"])
         self.assertTrue(values["Visibility"].startswith("PARTIAL"))
 
     def test_complete_search_query_is_reused_for_repeated_titles(self):
@@ -123,7 +123,7 @@ class BuyerRuntimeTests(unittest.TestCase):
              mock.patch.object(vc, "_blocked_reason", return_value=""), \
              mock.patch.object(vc, "_search", return_value="ID") as search:
             results = vc.check_listings("local-debug", "PK", targets, lambda _: None, lambda _: None)
-        self.assertEqual(results, [lv.SEARCH, lv.SEARCH, lv.UNCLEAR])
+        self.assertEqual(results, [lv.SEARCH, lv.SEARCH, lv.ID_MISSING])
         search.assert_called_once()
 
     def test_unloaded_search_does_not_become_link_only(self):
@@ -162,7 +162,40 @@ class BuyerRuntimeTests(unittest.TestCase):
             summary = vc.run_visibility_checks(posts, lambda _: None, threading.Event(),
                                                 options=lv.BuyerOptions(pk_profile="pk", us_enabled=False))
         self.assertEqual(summary, {"OK": 1})
-        self.assertEqual(posts[0]["_visibility_cols"]["PK Check"], "1/1 in search")
+        self.assertEqual(posts[0]["_visibility_cols"]["PK Check"], "Found in search: 1 of 1 sampled.")
+        self.assertIn("Close the PK buyer", posts[0]["_visibility_cols"]["Next Step"])
+        self.assertIn("PK", posts[0]["_cleanup_issues"])
+
+    def test_price_only_samples_do_not_launch_buyers_or_search_other_sellers(self):
+        posts = [{"rowNumber": 4, "_live_listings": [
+            {"state": "LIVE", "title": "Common service", "price": "$45", "listingId": ""},
+        ]}]
+        with mock.patch.object(vc, "start_profile") as start, \
+             mock.patch.object(vc, "update_column_values", return_value=(True, "Saved")):
+            vc.run_visibility_checks(posts, lambda _: None, threading.Event(),
+                                     options=lv.BuyerOptions(pk_profile="pk", us_enabled=False))
+        start.assert_not_called()
+        self.assertEqual(posts[0]["_buyer_rows"][0]["PK"], lv.ID_MISSING)
+        self.assertIn("seller scan", posts[0]["_visibility_cols"]["Next Step"])
+
+    def test_stopped_pass_keeps_both_results_and_manual_browser_cleanup_advice(self):
+        stop = threading.Event()
+        posts = [{"rowNumber": 4, "_live_listings": [{"state": "LIVE", "title": "Roof", "listingId": "123"}]}]
+
+        def finished(*_args, **_kwargs):
+            stop.set()
+            return [lv.SEARCH]
+
+        with mock.patch.object(vc, "start_profile", return_value=(True, {"url": "http://127.0.0.1:1"})), \
+             mock.patch.object(vc, "stop_profile", return_value=False), \
+             mock.patch.object(vc, "check_listings", side_effect=finished), \
+             mock.patch.object(vc, "update_column_values", return_value=(True, "Saved")):
+            with self.assertRaises(AutomationStopped):
+                vc.run_visibility_checks(posts, lambda _: None, stop,
+                                         options=lv.BuyerOptions(pk_profile="pk", us_enabled=False))
+        self.assertEqual(posts[0]["_buyer_rows"][0]["PK"], lv.SEARCH)
+        self.assertEqual(posts[0]["_visibility_cols"]["Visibility"], "STOPPED")
+        self.assertIn("Close the PK buyer", posts[0]["_visibility_cols"]["Next Step"])
 
     def test_stop_after_last_result_does_not_erase_it(self):
         stop = threading.Event()
@@ -188,7 +221,7 @@ class ParallelBuyerTests(unittest.TestCase):
     def test_pk_and_us_run_side_by_side(self):
         barrier = threading.Barrier(2, timeout=5)  # both must be inside a check at the same time
 
-        def fake_check(url, label, targets, log, sleep, on_result=None, on_detail=None):
+        def fake_check(url, label, targets, log, sleep, on_result=None, on_detail=None, context_info=None):
             barrier.wait()
             for _ in targets:
                 on_result()
@@ -200,8 +233,8 @@ class ParallelBuyerTests(unittest.TestCase):
         with mock.patch.object(vc, "start_profile", return_value=(True, {"url": "http://127.0.0.1:1"})),              mock.patch.object(vc, "stop_profile", return_value=True),              mock.patch.object(vc, "check_listings", side_effect=fake_check),              mock.patch.object(vc, "update_column_values", side_effect=lambda sheet, row, values: saved.append(values) or (True, "ok")):
             summary = vc.run_visibility_checks(posts, lambda _: None, threading.Event(), options=options)
         self.assertEqual(summary, {"OK": 1}, "a sequential run would time out on the barrier and report ERROR")
-        self.assertEqual(saved[0]["PK Check"], "1/1 in search")
-        self.assertEqual(saved[0]["US Check"], "1/1 in search")
+        self.assertEqual(saved[0]["PK Check"], "Found in search: 1 of 1 sampled.")
+        self.assertEqual(saved[0]["US Check"], "Found in search: 1 of 1 sampled.")
 
     def test_one_buyer_failing_to_start_keeps_the_other_buyers_results(self):
         def fake_start(profile, **kwargs):
@@ -212,8 +245,8 @@ class ParallelBuyerTests(unittest.TestCase):
         with mock.patch.object(vc, "start_profile", side_effect=fake_start),              mock.patch.object(vc, "stop_profile", return_value=True),              mock.patch.object(vc, "check_listings", side_effect=lambda *a, on_result=None, **k: (on_result(), [lv.SEARCH])[1]),              mock.patch.object(vc, "update_column_values", side_effect=lambda sheet, row, values: saved.append(values) or (True, "ok")):
             vc.run_visibility_checks(posts, lambda _: None, threading.Event(),
                                      options=lv.BuyerOptions(pk_profile="pk", us_profile="us"))
-        self.assertEqual(saved[0]["US Check"], "1/1 in search")
-        self.assertIn("error", saved[0]["PK Check"])
+        self.assertEqual(saved[0]["US Check"], "Found in search: 1 of 1 sampled.")
+        self.assertIn("did not open", saved[0]["PK Check"])
 
 
 class SlowSearchRetryTests(unittest.TestCase):
@@ -254,7 +287,7 @@ class MidRunBlockTests(unittest.TestCase):
         results, logs, capture = self.run_check(["", "LOGGED_OUT", "LOGGED_OUT"])
         self.assertEqual(results, [lv.LOGIN_REQUIRED, lv.LOGIN_REQUIRED])
         capture.assert_called_once()
-        self.assertTrue(any("interrupted (LOGGED_OUT)" in line for line in logs))
+        self.assertTrue(any("interrupted (LOGGED_OUT" in line for line in logs))
 
     def test_completed_results_survive_a_later_sign_in_prompt(self):
         results, logs, capture = self.run_check(["", "", "LOGGED_OUT", "LOGGED_OUT"])

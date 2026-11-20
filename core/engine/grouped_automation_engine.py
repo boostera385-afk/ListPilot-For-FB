@@ -102,7 +102,10 @@ class GroupedProfileWorker:
                     self.completion_callback(p, False)
                     continue  # unclaimed rows remain pending when stopped
                 if self.task_type == "Live Checker":
-                    p["_live_check"] = "PROFILE_START_FAILED"
+                    from core.automation import issues as iss
+                    launch_code = iss.from_launch_error(e)
+                    self.log(f"{iss.label(launch_code)}. Next step: {iss.next_step(launch_code)}")
+                    p["_live_check"] = launch_code
                     p["_live_error"] = str(e)
                     # Launch failures happened before claiming a row. Save diagnostics
                     # only if we can claim it, never overwrite another worker's result.
@@ -114,13 +117,16 @@ class GroupedProfileWorker:
                             from core.config import load_config
                             options = p.get("_buyer_options") or lv.BuyerOptions.from_settings(load_config())
                             values = {
-                                "Check Result": f"PROFILE_START_FAILED: {_clean_failure_message(e)}",
+                                "Check Result": f"{launch_code}: {_clean_failure_message(e)}",
                                 "Last Checked": ls.timestamp(), "Scan Time": "",
                                 **{column: "" for column in (
                                     "Total Listings", "Live Count", "Pending Count", "Rejected Count",
                                     "Other Count", "Duplicate Count", "Duplicate Details", "Status Summary",
                                     "Listing Details", "All Listings", "Needs Attention")},
                                 **lv.owner_buyer_columns(options, owner_failed=True),
+                                "Buyer Summary": f"Seller profile did not open: {iss.label(launch_code)}. "
+                                                 "Buyer checks did not run.",
+                                "Next Step": iss.next_step(launch_code),
                             }
                             saved, message = update_column_values(self.task_type, p["rowNumber"], values)
                             if not saved:

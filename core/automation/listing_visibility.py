@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from core.utils.smart_match import loose_key
 from core.automation import listing_status as ls
+from core.automation.listing_dates import normalize_window
+from core.automation import issues as iss
 
 # --- Result per listing per checker ------------------------------------------
 SEARCH = "SEARCH"        # shown in Marketplace search results
@@ -20,7 +22,20 @@ ERROR = "ERROR"          # checker could not check it (logged out, timeout, ...)
 LOGIN_REQUIRED = "LOGIN_REQUIRED"
 CHECKPOINT = "CHECKPOINT"
 NETWORK_ERROR = "NETWORK_ERROR"
-UNVERIFIED_STATES = (UNCLEAR, ERROR, LOGIN_REQUIRED, CHECKPOINT, NETWORK_ERROR)
+ID_MISSING = "ID_MISSING"
+# Account/connection problems share the codes in core.automation.issues.
+PROXY_ERROR = iss.PROXY_ERROR
+PAGE_TIMEOUT = iss.PAGE_TIMEOUT
+TWO_FACTOR = iss.TWO_FACTOR
+TEMP_BLOCKED = iss.TEMP_BLOCKED
+ACCOUNT_DISABLED = iss.ACCOUNT_DISABLED
+NO_MARKETPLACE = iss.NO_MARKETPLACE
+PROFILE_START_FAILED = iss.PROFILE_START_FAILED
+PROFILE_PROXY_FAILED = iss.PROFILE_PROXY_FAILED
+BUYER_FAILURE_STATES = (UNCLEAR, ERROR, LOGIN_REQUIRED, CHECKPOINT, NETWORK_ERROR, PROXY_ERROR, PAGE_TIMEOUT,
+                        TWO_FACTOR, TEMP_BLOCKED, ACCOUNT_DISABLED, NO_MARKETPLACE, PROFILE_START_FAILED,
+                        PROFILE_PROXY_FAILED)
+UNVERIFIED_STATES = (*BUYER_FAILURE_STATES, ID_MISSING)
 TEXT_MATCH = "TEXT_MATCH"  # in search by exact title + price; no listing ID to confirm it
 NOT_FOUND = "NOT_FOUND"    # searched, not in the results, and no listing ID to try the link
 
@@ -45,6 +60,7 @@ class BuyerOptions:
     limit: int = DEFAULT_SAMPLE_SIZE
     open_details: bool = False
     owner_enabled: bool = True
+    listed_window: str = "all"  # listing_dates.WINDOWS key: only listings posted in this window
 
     @classmethod
     def from_settings(cls, settings):
@@ -62,6 +78,7 @@ class BuyerOptions:
             us_profile=str(settings.get("live_check_us_profile") or "").strip(),
             limit=limit, open_details=flag("live_check_open_details", False),
             owner_enabled=flag("live_check_owner_enabled"),
+            listed_window=normalize_window(settings.get("live_check_listed_window")),
         )
 
     @property
@@ -113,6 +130,12 @@ def owner_buyer_columns(options, has_live=False, owner_failed=False):
             f"{idle}; enabled buyers were not run. No visibility conclusion."
         ),
         "Visibility Checked": "",
+        "Buyer Summary": ("Seller scan finished; buyer checks are waiting." if pending else
+                          "Buyer checks are off." if not active else f"{idle}; buyer checks did not run."),
+        "Next Step": ("Wait for the buyer checks to finish." if pending else
+                      "Fix the seller scan, then retry." if owner_failed and active else
+                      "Enable buyer checks in Settings if needed." if not active else "No live listings to sample."),
+        "Buyer Search Area": "",
     }
 
 
@@ -267,11 +290,15 @@ def describe_results(results, limit=3):
 def state_label(state):
     """Plain words for one buyer result (used in the app's Buyer checks tab)."""
     return {
-        SEARCH: "In search (exact ID)", TEXT_MATCH: "Possible match (title + price)",
+        SEARCH: "Found in search", TEXT_MATCH: "Similar listing found; seller not confirmed",
         LINK_ONLY: "Link opens; not seen in sampled search", NOT_FOUND: "No match in sampled search (no ID)",
-        HIDDEN: "Item page unavailable", UNCLEAR: "Not verified", ERROR: "Error",
+        HIDDEN: "Item page unavailable", UNCLEAR: "Could not check search; please retry", ERROR: "Check failed; please retry",
         LOGIN_REQUIRED: "Login needed", CHECKPOINT: "Account check needed",
-        NETWORK_ERROR: "Connection interrupted",
+        NETWORK_ERROR: "Connection interrupted", PROXY_ERROR: "Proxy failed", PAGE_TIMEOUT: "Page too slow",
+        TWO_FACTOR: "Login code needed", TEMP_BLOCKED: "Temporarily blocked", ACCOUNT_DISABLED: "Account disabled",
+        NO_MARKETPLACE: "No Marketplace", PROFILE_START_FAILED: "Buyer profile did not open",
+        PROFILE_PROXY_FAILED: "Buyer proxy failed at launch",
+        ID_MISSING: "Seller link missing; retry the seller scan",
     }.get(state, str(state))
 
 
@@ -294,6 +321,8 @@ def listing_verdict(states):
         return "Not seen in sampled search" + note
     if TEXT_MATCH in states:
         return "Possible title + price match"
+    if ID_MISSING in states:
+        return "Seller link missing — retry the seller scan"
     return "Not verified"
 
 
@@ -348,22 +377,36 @@ def classify_item_page(url, headings, title, requested_url):
 
 
 def summarize_checker(results):
-    """'3/4 in search, 1 link only' style text for one checker's column."""
+    """Plain-language observations; an unread search is never presented as a zero score."""
     if not results:
         return "Not checked"
     total = len(results)
     counts = {}
     for state in results:
         counts[state] = counts.get(state, 0) + 1
-    parts = [f"{counts.get(SEARCH, 0)}/{total} in search"]
+    unverified = sum(counts.get(state, 0) for state in UNVERIFIED_STATES)
+    if counts.get(ID_MISSING) == total:
+        return f"Not checked: exact seller links are missing for {total} sampled listing(s). Retry the seller scan."
+    if unverified == total:
+        parts = [f"Could not check any of {total} listings"]
+    else:
+        parts = [f"Found in search: {counts.get(SEARCH, 0)} of {total} sampled"]
     if counts.get(TEXT_MATCH):
-        parts.append(f"{counts[TEXT_MATCH]} possible by title+price")
-    for state, word in ((LINK_ONLY, "link only"), (NOT_FOUND, "no match (no ID)"), (HIDDEN, "item unavailable"),
-                        (UNCLEAR, "unverified"), (ERROR, "error"), (LOGIN_REQUIRED, "login needed"),
-                        (CHECKPOINT, "account check needed"), (NETWORK_ERROR, "connection interrupted")):
+        parts.append(f"{counts[TEXT_MATCH]} similar listing(s); seller not confirmed")
+    for state, word in ((LINK_ONLY, "link(s) open; not seen in search"), (NOT_FOUND, "no confirmed match; listing ID missing"),
+                        (HIDDEN, "item page(s) unavailable"),
+                        (UNCLEAR, "search check(s) could not finish"), (ERROR, "check(s) failed"), (LOGIN_REQUIRED, "login needed"),
+                        (CHECKPOINT, "account check needed"), (NETWORK_ERROR, "connection interrupted"),
+                        (PROXY_ERROR, "proxy failed"), (PAGE_TIMEOUT, "page too slow"),
+                        (TWO_FACTOR, "login code needed"), (TEMP_BLOCKED, "temporarily blocked"),
+                        (ACCOUNT_DISABLED, "account disabled"), (NO_MARKETPLACE, "Marketplace unavailable"),
+                        (PROFILE_START_FAILED, "buyer profile did not open"),
+                        (PROFILE_PROXY_FAILED, "buyer proxy failed at launch")):
         if counts.get(state):
             parts.append(f"{counts[state]} {word}")
-    return ", ".join(parts)
+    if counts.get(ID_MISSING):
+        parts.append(f"{counts[ID_MISSING]} not checked; exact seller link missing")
+    return ". ".join(parts) + "."
 
 
 def compare_regions(per_checker, expected=None):
@@ -406,8 +449,8 @@ def compare_regions(per_checker, expected=None):
 def overall_visibility(per_checker):
     """One code for the row from ``{label: [state, ...]}``.
 
-    HIDDEN beats everything (a buyer cannot open it), then not-in-search, then
-    gaps in the check. OK means every checker found every listing in search.
+    An unavailable item page is a warning; otherwise incomplete buyer checks
+    take precedence over observed search misses. OK means every sampled check found an exact ID.
     """
     states = [s for results in per_checker.values() for s in results]
     if not states:
@@ -415,16 +458,100 @@ def overall_visibility(per_checker):
     hidden = sum(1 for s in states if s == HIDDEN)
     if hidden:
         return f"HIDDEN: {hidden} result(s)"
-    link_only = states.count(LINK_ONLY)
-    if link_only:
-        return f"NOT_IN_SEARCH: {link_only} result(s)"
-    gaps = sum(1 for s in states if s != SEARCH and s != TEXT_MATCH)
+    gaps = sum(1 for s in states if s not in (SEARCH, TEXT_MATCH, LINK_ONLY))
     if gaps:
-        return f"PARTIAL: {gaps} result(s) not checked"
+        return f"PARTIAL: {gaps} buyer check(s) could not be completed"
     text_only = sum(1 for s in states if s == TEXT_MATCH)
     if text_only:
-        return f"PARTIAL: {text_only} result(s) matched by title+price only (no listing ID)"
+        return f"PARTIAL: {text_only} similar listing(s); seller not confirmed"
+    link_only = states.count(LINK_ONLY)
+    if link_only:
+        return f"NOT_IN_SEARCH: {link_only} link(s) open; not seen in sampled search"
     return ls.OK
+
+
+# Most specific failure first: a logged-out buyer explains its unreadable searches.
+_FAILURE_PRIORITY = (ACCOUNT_DISABLED, TEMP_BLOCKED, LOGIN_REQUIRED, TWO_FACTOR, CHECKPOINT, NO_MARKETPLACE,
+                     PROFILE_PROXY_FAILED, PROFILE_START_FAILED, PROXY_ERROR, NETWORK_ERROR, PAGE_TIMEOUT,
+                     UNCLEAR, ERROR)
+_FAILURE_WORDS = {
+    LOGIN_REQUIRED: "logged out of Facebook",
+    TWO_FACTOR: "Facebook asks for a login code",
+    CHECKPOINT: "Facebook account check needed",
+    TEMP_BLOCKED: "Facebook temporarily blocked the account",
+    ACCOUNT_DISABLED: "Facebook account disabled",
+    NO_MARKETPLACE: "Marketplace not available to the account",
+    PROFILE_PROXY_FAILED: "profile could not start with its proxy",
+    PROFILE_START_FAILED: "profile did not open",
+    PROXY_ERROR: "proxy connection failed",
+    NETWORK_ERROR: "internet/proxy connection failed",
+    PAGE_TIMEOUT: "Facebook pages loaded too slowly",
+    UNCLEAR: "search page could not be read",
+    ERROR: "check failed",
+}
+_FAILURE_ACTIONS = {
+    LOGIN_REQUIRED: "Open the {labels} buyer profile and sign in to Facebook",
+    TWO_FACTOR: "Open the {labels} buyer profile and enter Facebook's login code",
+    CHECKPOINT: "Open the {labels} buyer profile and complete Facebook's account check",
+    TEMP_BLOCKED: "Rest the {labels} buyer account for several hours, or use another buyer account",
+    ACCOUNT_DISABLED: "Replace the {labels} buyer account in Settings (Facebook disabled it)",
+    NO_MARKETPLACE: "Use a {labels} buyer account that has Marketplace",
+    PROFILE_PROXY_FAILED: "Fix or replace the {labels} buyer profile's proxy in Incogniton, then retry",
+    PROFILE_START_FAILED: "Open Incogniton and make sure the {labels} buyer profile starts, then retry",
+    PROXY_ERROR: "Check the {labels} buyer profile's proxy in Incogniton (internet/proxy online, login correct), then retry",
+    NETWORK_ERROR: "Check the {labels} buyer's internet/proxy connection, then retry",
+    PAGE_TIMEOUT: "The {labels} buyer's internet/proxy is too slow; check it or retry later",
+    UNCLEAR: "Open the {labels} buyer profile, confirm Marketplace search loads, then retry",
+    ERROR: "Retry the {labels} buyer check",
+}
+
+
+def buyer_failures(per_checker):
+    """``[(failure state, [labels])]`` grouped by each buyer's most specific failure."""
+    groups = {}
+    for label, results in per_checker.items():
+        state = next((s for s in _FAILURE_PRIORITY if s in results), None)
+        if state:
+            groups.setdefault(state, []).append(label)
+    return [(state, groups[state]) for state in _FAILURE_PRIORITY if state in groups]
+
+
+def buyer_guidance(per_checker, skipped=0):
+    """A short outcome and an actionable next step, independent of technical result codes."""
+    states = [state for results in per_checker.values() for state in results]
+    if not states:
+        return "Buyer checks have not run.", "Run buyer checks to see what another account can access."
+    failures = buyer_failures(per_checker)
+    found = states.count(SEARCH)
+    links = states.count(LINK_ONLY)
+    notes = []
+    if failures:
+        notes.append("Check incomplete: " + "; ".join(
+            f"{', '.join(labels)} buyer could not finish ({_FAILURE_WORDS[state]})" for state, labels in failures))
+    if found:
+        notes.append(f"{found} buyer check(s) found the exact listing in search")
+    if links:
+        notes.append(f"{links} buyer check(s): link opens, not seen in search")
+    if TEXT_MATCH in states:
+        notes.append("Similar listings found, but the seller could not be confirmed")
+    if HIDDEN in states:
+        notes.append(f"{states.count(HIDDEN)} item page(s) unavailable to a buyer")
+    if NOT_FOUND in states:
+        notes.append("No confirmed match for listing(s) without an ID")
+    if ID_MISSING in states:
+        notes.append("Exact seller links are missing; buyer visibility could not be verified")
+    if skipped:
+        notes.append(f"Only a sample was checked; {skipped} other listing(s) were not checked")
+    action = [_FAILURE_ACTIONS[state].format(labels=", ".join(labels)) for state, labels in failures]
+    if HIDDEN in states:
+        action.append("Open the affected item link manually; unavailable does not prove an account ban")
+    if TEXT_MATCH in states or NOT_FOUND in states or ID_MISSING in states:
+        action.append("Re-run the seller scan to collect exact listing links")
+    if links:
+        action.append("Check the buyer's Marketplace city/ZIP and radius near the listing, then retry search")
+    if not action:
+        action.append("No issue found in this sample" if not skipped else "Use a larger sample if needed")
+    return ". ".join(notes) + ".", ". ".join(action) + "."
 
 
 def format_visibility_details(targets, per_checker, max_chars=45000):
@@ -437,16 +564,18 @@ def format_visibility_details(targets, per_checker, max_chars=45000):
         if target.get("listingId"):
             parts.append(f"ID {target['listingId']}")
         for label, results in per_checker.items():
-            parts.append(f"{label}: {results[index] if index < len(results) else ERROR}")
+            parts.append(f"{label}: {state_label(results[index] if index < len(results) else ERROR)}")
         lines.append(" | ".join(parts))
     text = "\n".join(lines)
     return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
 
 
 def visibility_label(code):
+    if str(code).startswith("PARTIAL:") and "outside this sample" in str(code):
+        return "Sample passed — other listings not checked"
     return {
         "OK": "Found in search", "NOT_IN_SEARCH": "Link opens; not seen in sample",
-        "HIDDEN": "Item page unavailable", "PARTIAL": "Sample / incomplete",
+        "HIDDEN": "Item page unavailable", "PARTIAL": "Check incomplete — see next step",
         "NOT_CHECKED": "Not checked", "SKIPPED": "Buyer checks off", "STOPPED": "Stopped",
         "PENDING": "Waiting for buyers",
     }.get(str(code).split(":")[0], str(code))
@@ -454,16 +583,17 @@ def visibility_label(code):
 
 def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None, owner_scanned=True):
     """Sheet values for one owner row after both checkers ran."""
-    values = {checker_column(label): summarize_checker(results) for label, results in per_checker.items()}
+    complete = {label: [states[i] if i < len(states) else UNCLEAR for i in range(len(targets))]
+                for label, states in per_checker.items()}
+    values = {checker_column(label): summarize_checker(results) for label, results in complete.items()}
     for label in disabled:
         values[checker_column(label)] = "Off"
     values["PK vs US"] = compare_regions(per_checker, expected=len(targets))
-    result = overall_visibility({label: [states[i] if i < len(states) else UNCLEAR
-                                          for i in range(len(targets))]
-                                 for label, states in per_checker.items()})
+    result = overall_visibility(complete)
     if skipped and result == ls.OK:
         result = f"PARTIAL: {skipped} listing(s) outside this sample"
     values["Visibility"] = result
+    values["Buyer Summary"], values["Next Step"] = buyer_guidance(complete, skipped)
     source = "live listings" if owner_scanned else "provided targets (owner scan off; seller status not checked)"
     scope = f"Sample: {len(targets)} of {len(targets) + skipped} {source} per enabled buyer."
     if skipped:
@@ -474,6 +604,7 @@ def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None, owne
     scope += f" PK vs US: {values['PK vs US']}. Matching results do not necessarily mean visible listings."
     if elapsed is not None:
         scope += f" Buyer check took {ls.format_duration(elapsed)}."
-    values["Visibility Details"] = scope + "\n" + format_visibility_details(targets, per_checker)
+    values["Visibility Details"] = (values["Buyer Summary"] + "\nNext step: " + values["Next Step"] +
+                                    "\n" + scope + "\n" + format_visibility_details(targets, per_checker))
     values["Visibility Checked"] = ls.timestamp()
     return values

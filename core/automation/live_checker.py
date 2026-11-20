@@ -11,7 +11,10 @@ from core.utils.smart_match import loose_key
 from core.utils import layout_memory
 from core.automation import listing_status as ls
 from core.automation import listing_visibility as lv
-from core.automation.facebook_page import page_issue
+from core.automation import listing_dates as ld
+from core.automation.facebook_page import (page_issue, network_error_code, describe_network_error,
+                                           continue_remembered_account)
+from core.automation import issues as iss
 from core.config import load_config
 
 FB_MARKETPLACE_HOME = "https://www.facebook.com/marketplace/?ref=bookmark"
@@ -406,6 +409,8 @@ _READ_LISTINGS_TABLE_JS = r"""
     const lines = itemCell ? itemCell.innerText.split('\n').map(clean).filter(Boolean) : [];
     const title = view ? clean(view.getAttribute('aria-label').replace(/^View listing:\s*/i, '')) : (lines[0] || '');
     const categoryLine = lines.find((line) => /^category:/i.test(line)) || '';
+    const listedLine = lines.find((line) => line !== title &&
+      /^(?:[·•]\s*)?(?:listed|posted)|^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?$/i.test(line)) || '';
     const last = lines.length > 1 ? lines[lines.length - 1] : '';
     const status = last && last !== title && !/^category:/i.test(last) ? last : '';
     const reason = lines.find(line => line !== title &&
@@ -426,6 +431,7 @@ _READ_LISTINGS_TABLE_JS = r"""
       clicks: cellText(row, col.clicks),
       saves: cellText(row, col.saves),
       messages: cellText(row, col.messages),
+      listed: listedLine.replace(/^[·•]\s*/, ''),
       listingId: listingId,
     };
   });
@@ -586,22 +592,32 @@ def _wait_for_listing_details(page, title, sleep):
 
 
 def _close_listing_dialog(page, sleep):
-    """Close an open "Your Listing" dialog with its Close button (or Escape)."""
-    try:
-        close_btn = page.locator('[role="dialog"] [aria-label="Close"][role="button"]').last
-        if close_btn.count():
-            try:
-                close_btn.click(timeout=3000)
-            except Exception:
-                close_btn.evaluate("el => el.click()")
-        else:
-            page.keyboard.press("Escape")
-    except Exception:
+    """Close the seller dialog and wait for dismissal, including delayed animations."""
+    gone = r"""() => !Array.from(document.querySelectorAll('[role="dialog"]')).some(
+        el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')"""
+    for attempt in range(3):
+        sleep(0)  # honour Stop between bounded attempts
         try:
-            page.keyboard.press("Escape")
+            if not page.locator('[role="dialog"]:visible').count():
+                return True
+            close_btn = page.locator(
+                '[role="dialog"]:visible [aria-label="Close"]:visible, '
+                '[role="dialog"]:visible button:has-text("Close"):visible'
+            ).last
+            if attempt == 0 and close_btn.count():
+                close_btn.click(timeout=2000)
+            else:
+                page.keyboard.press("Escape")
+            page.wait_for_function(gone, timeout=2500)
+            return True
+        except AutomationStopped:
+            raise
         except Exception:
             pass
-    sleep(0.8)
+    try:
+        return page.locator('[role="dialog"]:visible').count() == 0
+    except Exception:
+        return False
 
 # A filter, search or non-default sort can push an older listing to the top.
 _LISTINGS_VIEW_STATE_JS = r"""
@@ -881,8 +897,36 @@ def _wait_for_feed_growth(page, known_markers, sleep, window, deadline=None):
     return False
 
 
-def read_old_section(page, section_name, sleep, collect_all=False, deadline=None):
-    """Cards of one section ("Needs attention" / "All listings"), newest first."""
+_CLAIMED_ACTIVE_JS = r"""
+() => {
+  const match = document.body.innerText.match(/\b(\d[\d,]*)\+?\s+active listings\b/i);
+  return match ? Number(match[1].replace(/,/g, '')) : 0;
+}
+"""
+
+FEED_EXTRA_IDLE = 6  # extra quiet windows allowed while fewer cards than Facebook's own count were read
+
+
+def _nudge_feed(page):
+    """Real input as a last resort: some feeds only load on wheel/keyboard scrolling."""
+    try:
+        size = page.viewport_size or page.evaluate("() => ({width: innerWidth, height: innerHeight})")
+        page.mouse.move(size["width"] * 0.6, size["height"] * 0.6)
+        page.mouse.wheel(0, 2400)
+        page.keyboard.press("End")
+    except AutomationStopped:
+        raise
+    except Exception:
+        pass
+
+
+def read_old_section(page, section_name, sleep, collect_all=False, deadline=None, expected=0):
+    """Cards of one section ("Needs attention" / "All listings"), newest first.
+
+    ``expected`` is a lower bound from Facebook's own "N active listings" count: while
+    fewer cards were read, the feed gets more patience and stronger scrolling instead
+    of being declared finished after a slow batch.
+    """
     try:
         selector = _old_heading_selector(section_name)
         if section_name == SECTION_ALL_LISTINGS:
@@ -930,7 +974,8 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
             idle = 0
         else:
             idle += 1
-        if idle >= need_idle:
+        short = patient and expected and len(collected) < expected
+        if idle >= need_idle and not (short and idle < need_idle + FEED_EXTRA_IDLE):
             break
         # After one quiet window, jump to the very bottom: that is where a "load more" area
         # triggers. If that window is quiet too, the feed has really ended.
@@ -940,6 +985,8 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
             page.evaluate(_SCROLL_OLD_FEED_JS, [section_name, to_bottom])
         except Exception:
             break
+        if patient and idle >= 1:
+            _nudge_feed(page)
         _wait_for_feed_growth(page, known, sleep, window, deadline)
     return list(collected.values())
 
@@ -955,7 +1002,7 @@ def _back_to_selling_page(page, sleep, start_url):
                 pass
             if "/marketplace/you/selling" not in (page.url or ""):
                 page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_selector(_OLD_CARD_SELECTOR, timeout=10000)
+        page.wait_for_selector(_OLD_CARD_SELECTOR, state="attached", timeout=10000)
     except Exception:
         pass
 
@@ -1157,6 +1204,7 @@ def _listing_from_row(row, label):
         "listingId": _clean(row.get("listingId")),
         "clicksCount": parse_count(row.get("clicks")),
         "messagesCount": parse_count(row.get("messages")),
+        "listed": _clean(row.get("listed")),
         "tab": label,
         "state": ls.classify_status(label, row.get("status"), row.get("reason")),
     }
@@ -1222,11 +1270,31 @@ def read_all_listings_old_ui(page, sleep):
     """Every card of the older layout's two sections, as ``(listings, tab_counts)``."""
     listings, tab_counts, notes = [], {}, []
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+    try:
+        claimed = int(page.evaluate(_CLAIMED_ACTIVE_JS) or 0)
+    except AutomationStopped:
+        raise
+    except Exception:
+        claimed = 0
     for section in (SECTION_NEEDS_ATTENTION, SECTION_ALL_LISTINGS):
         if time.monotonic() >= deadline:
             notes.append(f"'{section}' section skipped (scan time limit)")
             continue
-        cards = read_old_section(page, section, sleep, collect_all=True, deadline=deadline)
+        expected = claimed if section == SECTION_ALL_LISTINGS else 0
+        cards = read_old_section(page, section, sleep, collect_all=True, deadline=deadline, expected=expected)
+        if expected and len(cards) < expected and time.monotonic() + 30 < deadline:
+            # A stalled lazy feed: reload once and keep whichever read saw more cards.
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                sleep(2.0)
+                again = read_old_section(page, section, sleep, collect_all=True, deadline=deadline,
+                                         expected=expected)
+                if len(again) > len(cards):
+                    cards = again
+            except AutomationStopped:
+                raise
+            except Exception:
+                pass
         tab_counts[section] = len(cards)
         if len(cards) >= MAX_SCAN_ROWS or time.monotonic() >= deadline:
             notes.append(f"'{section}' section reached the scan limit")
@@ -1247,11 +1315,11 @@ def read_all_listings_old_ui(page, sleep):
             })
     # The sidebar count is a lower bound, not a substitute for reading cards.
     try:
-        claimed = page.evaluate(r"""() => {
-            const match = document.body.innerText.match(/\b(\d[\d,]*)\+?\s+active listings\b/i);
-            return match ? Number(match[1].replace(/,/g, '')) : 0;
-        }""")
-        active = [item for item in ls.dedupe_listings(listings) if item["state"] in (ls.LIVE, ls.PENDING)]
+        claimed = claimed or page.evaluate(_CLAIMED_ACTIVE_JS)
+        # Facebook's count includes active cards that need attention (e.g. "Active (Confirm your
+        # identity...)"), so compare it with every card that is not rejected/removed/sold.
+        inactive = (ls.REJECTED, ls.REMOVED, ls.EXPIRED, ls.SOLD, ls.DRAFT)
+        active = [item for item in ls.dedupe_listings(listings) if item["state"] not in inactive]
         warning = ls.tab_total_mismatch({"Marketplace profile": claimed}, active)
         if warning:
             notes.append(warning)
@@ -1277,36 +1345,107 @@ _OLD_DIALOG_ITEM_LINK_JS = r"""
 }
 """
 
+_OPEN_SAMPLE_CARD_JS = r"""
+([cardId, expectedTitle]) => {
+  const clean = value => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (Array.from(document.querySelectorAll('[role="dialog"]')).some(
+      el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')) return false;
+  const card = document.querySelector(`[data-lp-card-id="${cardId}"]`);
+  if (!card) return false;
+  if (clean(card.innerText) !== card.getAttribute('data-lp-signature')) return false;
+  const title = Array.from(card.querySelectorAll('[data-lp-title],span,div,a')).find(
+    el => clean(el.innerText) === clean(expectedTitle) &&
+      !Array.from(el.children).some(child => clean(child.innerText) === clean(expectedTitle)));
+  if (!title) return false;
+  // Validate and dispatch in ONE browser round trip. Separate count/text/click
+  // locator calls raced Facebook's rerender after scrolling back to the top.
+  title.click();
+  return true;
+}
+"""
+
+
+def _sample_fingerprint(item):
+    """Rebind only a unique full seller-card snapshot, never just a repeated service title."""
+    return (loose_key(item.get("title")), _clean(item.get("price")).casefold(),
+            _clean(item.get("listed")).casefold(), parse_count(item.get("clicksCount")),
+            _clean(item.get("status")).casefold(), _clean(item.get("reason")).casefold())
+
+
+def _refresh_sample_reference(page, reference, listings):
+    """A rerender may discard our markers; refuse an ambiguous replacement."""
+    fingerprint = _sample_fingerprint(reference)
+    originals = [item for item in listings if item.get("tab") == reference.get("tab")
+                 and _sample_fingerprint(item) == fingerprint]
+    if len(originals) != 1:
+        return ""
+    section = reference.get("tab") or SECTION_ALL_LISTINGS
+    cards = page.evaluate(_READ_CARDS_JS, section) or []
+    matches = []
+    for card in cards:
+        parsed = parse_old_card(card)
+        parsed["clicksCount"] = parse_count(parsed.get("clicks"))
+        if _sample_fingerprint(parsed) == fingerprint:
+            matches.append(card)
+    if len(matches) != 1:
+        return ""
+    reference["cardId"] = matches[0]["cardId"]
+    return str(reference["cardId"])
+
 
 def recover_old_sample_ids(page, listings, limit, sleep, log):
     """Read item links from only the sampled cards' own dialogs, never guess IDs by title."""
     sample, _ = lv.visibility_targets(listings, limit)
+    deadline = time.monotonic() + min(60, max(20, limit * 15))
     for target in sample:
+        sleep(0)
+        if time.monotonic() >= deadline:
+            log("Seller link recovery reached its time limit; missing links will remain unverified.")
+            break
         card_id = str(target.get("cardId") or "")
         if target.get("listingId") or not re.fullmatch(r"\d+", card_id):
             continue
+        reference = next((item for item in listings if str(item.get("cardId") or "") == card_id), None)
+        if reference is None:
+            continue
         start_url = page.url
-        opened = False
+        attempted = False
         try:
             if page.locator('[role="dialog"]:visible').count():
                 log("An existing dialog is still open; skipping ID recovery rather than reusing its item link.")
                 continue
-            card = page.locator(f'[data-lp-card-id="{card_id}"]')
-            title = card.locator('[data-lp-title]').first
-            if not title.count() or not _same_title(title.inner_text(timeout=2000), target["title"]):
-                continue
             log(f"Reading the exact item ID for buyer sample '{target['title']}'...")
-            title.click(timeout=5000)
-            opened = True
-            for _ in range(10):
+            issued = False
+            for attempt in range(2):
+                sleep(0)
+                attempted = True  # a timed-out dispatch can still open a dialog
+                try:
+                    issued = page.evaluate(_OPEN_SAMPLE_CARD_JS, [card_id, target["title"]]) is True
+                except AutomationStopped:
+                    raise
+                except Exception as exc:
+                    log(f"Card opening reply was interrupted; checking for its dialog before doing anything else "
+                        f"({str(exc).splitlines()[0]}).")
+                    issued = True  # do not blindly click again after an ambiguous reply
+                if issued:
+                    break
+                if attempt == 0:
+                    sleep(0.5)  # let scroll-to-top/rerender finish before refreshing markers
+                    card_id = _refresh_sample_reference(page, reference, listings)
+                    if not card_id:
+                        break
+            if not issued:
+                log("Could not safely identify this seller card after it changed; its link remains unverified.")
+                continue
+            for _ in range(16):
+                if time.monotonic() >= deadline:
+                    break
                 sleep(0.5)
                 links = page.evaluate(_OLD_DIALOG_ITEM_LINK_JS, target["title"]) or []
                 ids = {lv.item_id_from_href(link) for link in links} - {""}
                 if len(ids) == 1:
                     listing_id = ids.pop()
-                    for item in listings:
-                        if str(item.get("cardId") or "") == card_id:
-                            item["listingId"] = listing_id
+                    reference["listingId"] = listing_id
                     log(f"Buyer target ID confirmed from its seller card: {listing_id}.")
                     break
             else:
@@ -1316,8 +1455,12 @@ def recover_old_sample_ids(page, listings, limit, sleep, log):
         except Exception as exc:
             log(f"Could not read this sample's item ID; left unverified: {str(exc).splitlines()[0]}")
         finally:
-            if opened:
+            if attempted:
                 _back_to_selling_page(page, sleep, start_url)
+    chosen, _ = lv.visibility_targets(listings, limit)
+    verified = sum(bool(item.get("listingId")) for item in chosen)
+    log(f"Seller links ready for buyer sample: {verified} of {len(chosen)}. "
+        "Missing links cannot verify the seller in buyer search.")
 
 
 # --- Diagnostics and navigation fallback --------------------------------------
@@ -1422,6 +1565,8 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             saved, message = update_column_values(target_sheet, row_number, values)
             if not saved:
                 log(f"Note: could not save some sheet columns ({message}).")
+            elif str(message).startswith("Saved results."):
+                log(message)
             return saved
         except Exception as exc:
             log(f"Note: could not save the sheet columns: {exc}")
@@ -1468,6 +1613,9 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         values.update(extra or {})
         if target_sheet == LIVE_CHECKER_SHEET:
             values.update(lv.owner_buyer_columns(options, owner_failed=code != ls.NO_LISTINGS))
+            if iss.is_issue(code):
+                values["Buyer Summary"] = f"Seller scan stopped: {iss.label(code)}. Buyer checks did not run."
+                values["Next Step"] = iss.next_step(code)
         post.pop("_live_counts", None)
         post.pop("_live_listings", None)
         post.pop("_live_duplicates", None)
@@ -1478,7 +1626,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
 
     responses = None
 
-    def save_results(all_summary, needs_summary, scan, confirmed_empty=False):
+    def save_results(all_summary, needs_summary, scan, confirmed_empty=False, window_empty=False):
         log(f"All listings: {all_summary}")
         log(f"Needs attention: {needs_summary}")
         values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp(),
@@ -1486,20 +1634,25 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         if responses is not None:
             values["Responses"] = str(responses)
         values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE)),
-                                     owner_failed=not (scan and (scan["total"] or confirmed_empty))))
+                                     owner_failed=not (scan and (scan["total"] or confirmed_empty or window_empty))))
         if (target_sheet == LIVE_CHECKER_SHEET and options.checkers and scan and scan["counts"].get(ls.LIVE)
                 and not lv.visibility_targets(scan["listings"], options.limit)[0]):
             values.update({lv.checker_column(label): "Not checked: no readable listing titles"
                            for label, _ in options.checkers})
             values.update({"Visibility": "NOT_CHECKED", "PK vs US": "Not compared: no searchable targets",
-                           "Visibility Details": "Live listings were counted, but no readable titles were available for buyer search."})
+                           "Visibility Details": "Live listings were counted, but no readable titles were available for buyer search.",
+                           "Buyer Summary": "Buyer checks did not run: the seller listing names could not be read.",
+                           "Next Step": "Retry the seller scan to collect readable listing names and links."})
             post["_visibility"] = values["Visibility"]
             post["_visibility_cols"] = {column: values[column] for column in (
-                "PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked")}
+                "PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked",
+                "Buyer Summary", "Next Step", "Buyer Search Area")}
         headline = ""
-        if scan and (scan["total"] or confirmed_empty):
+        if scan and (scan["total"] or confirmed_empty or window_empty):
             counts = scan["counts"]
-            headline = scan["headline"]
+            headline = scan["headline"] if scan["total"] else "No listings in this window"
+            if scan.get("window"):
+                headline = f"{scan['window']}. {headline}"
             log(f"Full scan: {headline} ({scan['total']} listings; tabs: {scan['tabCounts']}) in "
                 f"{ls.format_duration(time.monotonic() - scan_started)}")
             log(f"Facebook-marked duplicates: {scan['duplicates']} (included in Rejected, not added to Total).")
@@ -1518,6 +1671,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             post["_live_duplicates"] = scan["duplicates"]
             post["_live_listings"] = scan["listings"]  # for the PK/US checker visibility pass
             if scan["notes"]:
+                log("Seller scan incomplete: " + "; ".join(scan["notes"]) + ".")
                 values["Check Result"] = ls.format_check_result("PARTIAL", "; ".join(scan["notes"]))
                 post["_live_check"] = "PARTIAL"
             else:
@@ -1534,7 +1688,10 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         if not write_columns(values):
             post["_live_check"] = "SHEET_WRITE_FAILED"
             raise PermanentError("Seller scan read, but Google Sheets did not confirm the result was saved.")
-        record_history(post["_live_check"], scan if scan and (scan["total"] or confirmed_empty) else None)
+        if scan and scan.get("window"):
+            log("Live History not updated: a 'Listed within' count is not comparable with full-account history.")
+        else:
+            record_history(post["_live_check"], scan if scan and (scan["total"] or confirmed_empty) else None)
         set_state(AutomationState.SUCCESS)
         prefix = f"{headline}; " if headline else ""
         if post["_live_check"] == "PARTIAL":
@@ -1579,7 +1736,8 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             if firsts and (firsts[0] or firsts[1]):
                 scan = read_all_listings_old_ui(page, interruptible_sleep)
                 if target_sheet == LIVE_CHECKER_SHEET and options.checkers:
-                    recover_old_sample_ids(page, scan[0], options.limit, interruptible_sleep, log)
+                    windowed, _ = ld.filter_listings(scan[0], options.listed_window)
+                    recover_old_sample_ids(page, windowed, options.limit, interruptible_sleep, log)
                 return firsts, scan
             if attempt < attempts:
                 log(f"Listings not loaded yet (attempt {attempt}/{attempts}). Reloading...")
@@ -1607,17 +1765,51 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         try:
             remembered_old = layout_memory.recall(profile_label) == "old"
             log("Opening Marketplace 'Your listings'...")
-            try:
-                page.goto(FB_MARKETPLACE_SELLING if remembered_old else FB_SELLER_LISTINGS,
-                          wait_until="domcontentloaded", timeout=20000)
-            except Exception:
-                pass
+            start_url = FB_MARKETPLACE_SELLING if remembered_old else FB_SELLER_LISTINGS
+            nav_issue = ""
+            for wait in (0, 5.0, 10.0):
+                if wait:
+                    log(f"{iss.describe(nav_issue, describe_network_error(network_error_code(page)))}; "
+                        f"waiting {int(wait)}s for the proxy/connection, then retrying...")
+                    interruptible_sleep(wait)
+                try:
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+                    nav_issue = ""
+                except AutomationStopped:
+                    raise
+                except Exception as exc:
+                    nav_issue = iss.from_exception(exc)
+                    if nav_issue == iss.BROWSER_CLOSED:
+                        raise RetryableError("The browser closed while opening Facebook.")
+                issue = page_issue(page) or nav_issue
+                if issue not in iss.CONNECTION_CODES:
+                    break
+                nav_issue = issue
 
             set_state(AutomationState.PAGE_LOADING)
-            if is_logged_out(page):
-                fail(ls.LOGGED_OUT, "Facebook profile is not logged in. Please log in to this profile first.")
-            if has_checkpoint(page):
-                fail(ls.CHECKPOINT, "Confirm your identity. Not retried, to avoid triggering more checks.")
+            issue = page_issue(page) or nav_issue
+            if issue == ls.LOGGED_OUT:
+                log("Facebook shows a login page; trying its 'Continue as' prompt for the saved account "
+                    "(no password is typed)...")
+                if continue_remembered_account(page, interruptible_sleep):
+                    interruptible_sleep(3.0)
+                    try:
+                        page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+                    except AutomationStopped:
+                        raise
+                    except Exception:
+                        pass
+                    issue = page_issue(page)
+                    log("Signed back in with the saved account." if not issue else
+                        "Facebook still shows the login page; the password is needed.")
+            if issue:
+                code = ls.LOGGED_OUT if issue == "LOGGED_OUT" else issue
+                detail = iss.next_step(code)
+                if code in iss.CONNECTION_CODES:
+                    net = network_error_code(page)
+                    detail = (f"{describe_network_error(net)}. " if net else "") + detail
+                capture_diagnostics(page, profile_label, log)
+                fail(code, detail)
 
             # Responses first: the Messenger badge in Facebook's top bar.
             from core.automation.fb_listing import read_messenger_unread_count
@@ -1675,6 +1867,10 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 if page.is_closed():
                     raise RetryableError("The browser page closed before listings could be read.")
                 facts = capture_diagnostics(page, profile_label, log)
+                issue = page_issue(page)
+                if issue and issue not in (ls.LOGGED_OUT, ls.CHECKPOINT):
+                    # Proxy drop, block, disabled account, ... found after the page first loaded.
+                    fail(issue, iss.next_step(issue))
                 code = ls.diagnose_empty_page(
                     url=facts.get("url"),
                     lang=facts.get("lang"),
@@ -1694,8 +1890,18 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 summarize_first_listing(all_first, SECTION_ALL_LISTINGS) if all_first else "No active listings"
             )
             needs_summary = summarize_first_listing(needs_first, SECTION_NEEDS_ATTENTION)
-            built = ls.build_scan_result(*scan) if scan else None
-            return save_results(all_summary, needs_summary, built)
+            if not scan:
+                return save_results(all_summary, needs_summary, None)
+            listings, tab_counts, notes = scan
+            kept, window = ld.filter_listings(listings, options.listed_window)
+            built = ls.build_scan_result(kept, tab_counts, notes)
+            built["window"] = ld.describe_filter(window)
+            if built["window"]:
+                log(built["window"] + ".")
+                if window["unknown"] == window["total"] and window["total"]:
+                    log("Note: Facebook showed no readable posted date on this layout, so the "
+                        "'Listed within' filter could not include any listing. Use 'Any time' for this profile.")
+            return save_results(all_summary, needs_summary, built, window_empty=bool(built["window"] and listings))
         finally:
             try:
                 page.close()
