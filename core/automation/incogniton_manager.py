@@ -20,6 +20,7 @@ _launch_attempts = {}
 _LAUNCH_WAIT_SECONDS = 60
 _LAUNCH_POLL_SECONDS = 0.5
 _LAUNCH_HTTP_TIMEOUT = (3, 120)
+_PREFLIGHT_POLLS = 5
 _PROFILE_CACHE_TTL_SECONDS = 15.0
 _PROFILE_ERROR_CACHE_TTL_SECONDS = 2.0
 _profile_cache_lock = threading.Lock()
@@ -421,7 +422,7 @@ def _wait_for_launch(profile_id, attempt, logger_callback, stop_event=None):
                 if 400 <= attempt.response.status_code < 500:
                     _launch_attempts.pop(profile_id, None)
                     _uncertain_launches.discard(profile_id)
-                    return False, f"Incogniton rejected the launch (HTTP {attempt.response.status_code}). Check the profile and API permissions."
+                    return False, f"PROFILE_LAUNCH_REJECTED: Incogniton returned HTTP {attempt.response.status_code}. Check the profile and API permissions."
                 if attempt.response.status_code == 200:
                     data = attempt.response.json()
                     if not isinstance(data, dict):
@@ -433,7 +434,7 @@ def _wait_for_launch(profile_id, attempt, logger_callback, stop_event=None):
                         _uncertain_launches.discard(profile_id)
                         if "already open" in str(data.get("message") or "").lower():
                             return False, "PROFILE_ALREADY_OPEN: Close this profile in Incogniton before retrying."
-                        return False, f"Incogniton returned error: {data.get('message') or data}"
+                        return False, f"PROFILE_LAUNCH_REJECTED: {data.get('message') or 'Incogniton rejected the launch'}."
             except (ValueError, TypeError):
                 pass
         if not attempt.stopped:
@@ -447,6 +448,16 @@ def _wait_for_launch(profile_id, attempt, logger_callback, stop_event=None):
                 note = " Recovered our running browser without another launch request." if recovered else ""
                 _launch_log(logger_callback, f"Browser CDP ready for profile {profile_id} after {elapsed:.1f}s.{note}")
                 return True, ready
+        if attempt.done.is_set() and attempt.error:
+            cause = getattr(attempt.error, "__cause__", None)
+            if isinstance(cause, requests.exceptions.ConnectionError) and any(
+                phrase in str(cause).lower() for phrase in ("connection refused", "actively refused")
+            ):
+                # Unlike a read timeout, refusal means the request never
+                # reached the local provider and is safe for the worker to retry.
+                _launch_attempts.pop(profile_id, None)
+                _uncertain_launches.discard(profile_id)
+                return False, "Incogniton refused the local API connection before the launch request was delivered."
         now = time.monotonic()
         if now >= deadline:
             attempt.expired = True
@@ -507,17 +518,32 @@ def start_profile(identifier, duplicate_resolver=None, master=None, max_retries=
                 return _wait_for_launch(profile_id, attempt, logger_callback, stop_event)
         if profile_id in _uncertain_launches:
             return False, "PROFILE_LAUNCH_PENDING: Previous launch is unresolved. No duplicate launch sent."
-        try:
-            status_response = _api_request("get", f"/profile/status/{profile_id}", timeout=(1, 3), retry=False)
-            status = str(status_response.json().get("status") or "").lower()
-            if status_response.status_code != 200:
-                return False, "Could not verify profile status before launch. No launch sent."
-            if status == "launched":
+        for check in range(_PREFLIGHT_POLLS):
+            _check_launch_stop(stop_event)
+            try:
+                status_response = _api_request("get", f"/profile/status/{profile_id}", timeout=(1, 3), retry=False)
+                status = str(status_response.json().get("status") or "").strip().lower()
+                if status_response.status_code != 200:
+                    return False, "Could not verify profile status before launch. No launch sent."
+            except Exception as exc:
+                return False, f"Could not verify profile status before launch: {exc}"
+            if status in ("launched", "running", "open"):
                 return False, "PROFILE_ALREADY_OPEN: Close this profile in Incogniton before retrying."
-            if status != "ready":
-                return False, f"Profile is not ready ({status or 'unknown'}). No duplicate launch sent."
-        except Exception as exc:
-            return False, f"Could not verify profile status before launch: {exc}"
+            if status == "ready":
+                if _profile_cdp_candidates(profile_id):
+                    return False, "PROFILE_ALREADY_OPEN: A browser for this profile is still running. Close it before retrying."
+                break
+            if status not in ("syncing", "synced", "stopping", "launching"):
+                return False, f"PROFILE_LAUNCH_REJECTED: Profile status is {status or 'unknown'}; no launch sent."
+            if check + 1 == _PREFLIGHT_POLLS:
+                return False, f"PROFILE_LAUNCH_PENDING: Incogniton is still {status}; no launch sent. Re-check once it shows Ready."
+            if check == 0:
+                _launch_log(logger_callback, f"Incogniton is {status}; waiting briefly for Ready before launching...")
+            if stop_event:
+                if stop_event.wait(1):
+                    _check_launch_stop(stop_event)
+            else:
+                time.sleep(1)
         _launch_log(logger_callback, "Sending one launch request; watching for the browser connection "
                     "so a slow API reply does not delay automation...")
         _check_launch_stop(stop_event)

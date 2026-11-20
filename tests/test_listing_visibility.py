@@ -14,10 +14,10 @@ class TargetTests(unittest.TestCase):
         ]
         targets, skipped = lv.visibility_targets(listings)
         self.assertEqual([t["title"] for t in targets], ["Roof repair", "Fence"])
-        self.assertEqual(skipped, 0)
+        self.assertEqual(skipped, 1)
         targets, skipped = lv.visibility_targets(listings, limit=1)
         self.assertEqual(len(targets), 1)
-        self.assertEqual(skipped, 1)
+        self.assertEqual(skipped, 2)
         self.assertEqual(lv.visibility_targets(None), ([], 0))
 
 
@@ -37,14 +37,25 @@ class SearchMatchTests(unittest.TestCase):
         self.assertIn("query=Roof%20%26%20gutter", lv.search_url("Roof & gutter"))
         self.assertEqual(lv.item_url("123"), "https://www.facebook.com/marketplace/item/123/")
 
+    def test_keyword_plan_is_bounded_and_removes_advertising_noise(self):
+        self.assertEqual(lv.search_queries({"title": "  fURNiTURe aSSEMBLY sErVIcE  "}),
+                         ["fURNiTURe aSSEMBLY sErVIcE", "furniture assembly"])
+        self.assertEqual(lv.search_queries({"title": "Roof repair"}), ["Roof repair"])
+        self.assertEqual(lv.search_queries({"title": "SPA | HOT TUB | Jacuzzi REPAIR"}),
+                         ["SPA | HOT TUB | Jacuzzi REPAIR", "spa hot tub jacuzzi repair"])
+        self.assertEqual(lv.search_queries({"title": "Best Roof & Gutter Repair Services Call 1234567890"}),
+                         ["Best Roof & Gutter Repair Services Call 1234567890", "roof gutter repair"])
+        self.assertEqual(lv.search_queries({"title": ""}), [])
+
 
 class ItemPageTests(unittest.TestCase):
     def test_classify(self):
         url = "https://www.facebook.com/marketplace/item/1/"
-        self.assertEqual(lv.classify_item_page(url, "Roof repair\n$50", "Roof repair"), lv.LINK_ONLY)
-        self.assertEqual(lv.classify_item_page(url, "This listing isn't available", "Roof repair"), lv.HIDDEN)
-        self.assertEqual(lv.classify_item_page("https://www.facebook.com/marketplace/", "x", "Roof repair"), lv.UNCLEAR)
-        self.assertEqual(lv.classify_item_page(url, "Loading", "Roof repair"), lv.UNCLEAR)
+        self.assertEqual(lv.classify_item_page(url, ["Roof repair"], "Roof repair", url), lv.LINK_ONLY)
+        self.assertEqual(lv.classify_item_page(url, ["This listing isn't available"], "Roof repair", url), lv.HIDDEN)
+        self.assertEqual(lv.classify_item_page("https://www.facebook.com/marketplace/", ["This listing isn't available"], "Roof repair", url), lv.UNCLEAR)
+        self.assertEqual(lv.classify_item_page(url.replace("/1/", "/2/"), ["Roof repair"], "Roof repair", url), lv.UNCLEAR)
+        self.assertEqual(lv.classify_item_page(url, ["Roof repair kit"], "Roof repair", url), lv.UNCLEAR)
 
 
 class RowTests(unittest.TestCase):
@@ -60,7 +71,7 @@ class RowTests(unittest.TestCase):
     def test_hidden_beats_link_only(self):
         values = lv.row_columns(self.targets, {"PK": [lv.LINK_ONLY, lv.SEARCH], "US": [lv.HIDDEN, lv.SEARCH]})
         self.assertEqual(values["Visibility"], "HIDDEN: 1 result(s)")
-        self.assertEqual(values["US Check"], "1/2 in search, 1 unavailable")
+        self.assertEqual(values["US Check"], "1/2 in search, 1 item unavailable")
 
     def test_link_only_and_gaps(self):
         self.assertEqual(lv.overall_visibility({"PK": [lv.LINK_ONLY, lv.ERROR]}), "NOT_IN_SEARCH: 1 result(s)")
@@ -107,24 +118,24 @@ class SearchFirstTests(unittest.TestCase):
         targets, _ = lv.visibility_targets([{"state": "LIVE", "title": "A", "listingId": "", "price": "$45"}])
         self.assertEqual(targets[0]["price"], "$45")
 
-    def test_summary_and_overall_count_text_matches_as_in_search_but_not_verified(self):
+    def test_summary_and_overall_keep_possible_matches_separate_from_exact_search_hits(self):
         states = [lv.SEARCH, lv.TEXT_MATCH, lv.TEXT_MATCH]
-        self.assertEqual(lv.summarize_checker(states), "3/3 in search, 2 by title+price")
+        self.assertEqual(lv.summarize_checker(states), "1/3 in search, 2 possible by title+price")
         self.assertTrue(lv.overall_visibility({"PK": states}).startswith("PARTIAL: 2 result(s) matched by title+price"))
         self.assertEqual(lv.overall_visibility({"PK": [lv.SEARCH, lv.SEARCH]}), "OK")
-        self.assertEqual(lv.overall_visibility({"PK": [lv.NOT_FOUND, lv.SEARCH]}), "NOT_IN_SEARCH: 1 result(s)")
-        self.assertIn("1 not found", lv.summarize_checker([lv.SEARCH, lv.NOT_FOUND]))
+        self.assertEqual(lv.overall_visibility({"PK": [lv.NOT_FOUND, lv.SEARCH]}), "PARTIAL: 1 result(s) not checked")
+        self.assertIn("1 no match (no ID)", lv.summarize_checker([lv.SEARCH, lv.NOT_FOUND]))
 
     def test_listing_verdict_puts_search_visibility_first(self):
         self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.SEARCH]), "Visible in search")
-        self.assertEqual(lv.listing_verdict([lv.TEXT_MATCH, lv.TEXT_MATCH]), "Visible (title + price)")
+        self.assertEqual(lv.listing_verdict([lv.TEXT_MATCH, lv.TEXT_MATCH]), "Possible title + price match")
         self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.LINK_ONLY]), "Visible to some buyers")
-        self.assertEqual(lv.listing_verdict([lv.LINK_ONLY, lv.LINK_ONLY]), "Not in search")
-        self.assertEqual(lv.listing_verdict([lv.NOT_FOUND]), "Not in search")
-        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.HIDDEN]), "Hidden from a buyer")
+        self.assertEqual(lv.listing_verdict([lv.LINK_ONLY, lv.LINK_ONLY]), "Not seen in sampled search")
+        self.assertEqual(lv.listing_verdict([lv.NOT_FOUND]), "Not verified")
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.HIDDEN]), "Item unavailable to a buyer")
         self.assertEqual(lv.listing_verdict([lv.UNCLEAR]), "Not verified")
         self.assertEqual(lv.listing_verdict([]), "Not checked")
-        self.assertEqual(lv.state_label(lv.LINK_ONLY), "Link opens, not in search")
+        self.assertEqual(lv.state_label(lv.LINK_ONLY), "Link opens; not seen in sampled search")
 
 
 class IdenticalListingTests(unittest.TestCase):
@@ -182,7 +193,7 @@ class BuyerSummaryTests(unittest.TestCase):
         ]
         text = lv.summarize_buyer_rows(rows)
         self.assertTrue(text.startswith("Buyer sample: 6 listings checked"))
-        for part in ("1 found by at least one buyer", "1 visible to some buyers", "2 not in search", "1 hidden", "1 not verified"):
+        for part in ("1 found by at least one buyer", "1 not seen in sampled search", "1 item unavailable", "3 not verified"):
             self.assertIn(part, text)
 
     def test_summary_is_empty_when_nothing_ran_and_singular_for_one(self):
@@ -193,17 +204,17 @@ class BuyerSummaryTests(unittest.TestCase):
 
 class UncheckedBuyerVerdictTests(unittest.TestCase):
     def test_an_unchecked_buyer_is_not_hidden_behind_a_clean_verdict(self):
-        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.NOT_FOUND]), "Not in search (a buyer could not check)")
-        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.TEXT_MATCH]), "Visible (title + price) (a buyer could not check)")
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.NOT_FOUND]), "Not verified")
+        self.assertEqual(lv.listing_verdict([lv.ERROR, lv.TEXT_MATCH]), "Possible title + price match")
         self.assertEqual(lv.listing_verdict([lv.ERROR, lv.SEARCH]), "Visible in search (a buyer could not check)")
-        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.NOT_FOUND]), "Visible to some buyers")
+        self.assertEqual(lv.listing_verdict([lv.SEARCH, lv.NOT_FOUND]), "Visible in search (a buyer could not check)")
         self.assertEqual(lv.listing_verdict([lv.ERROR, lv.UNCLEAR]), "Not verified")
 
     def test_summary_still_counts_them_by_what_was_seen(self):
         rows = [{"PK": lv.ERROR, "US": lv.NOT_FOUND}, {"PK": lv.ERROR, "US": lv.SEARCH}]
         text = lv.summarize_buyer_rows(rows)
         self.assertIn("1 found by at least one buyer", text)
-        self.assertIn("1 not in search", text)
+        self.assertIn("1 not verified", text)
 
     def test_login_failures_and_title_matches_are_explicit_in_summary(self):
         text = lv.summarize_buyer_rows([{"PK": lv.LOGIN_REQUIRED, "US": lv.TEXT_MATCH}])
@@ -229,11 +240,11 @@ class OwnerBuyerColumnsTests(unittest.TestCase):
 
 class RegionComparisonTests(unittest.TestCase):
     def test_identical_per_listing_outcomes_are_same_even_when_both_miss(self):
-        results = [lv.SEARCH, lv.NOT_FOUND, lv.LINK_ONLY, lv.HIDDEN]
+        results = [lv.SEARCH, lv.LINK_ONLY, lv.LINK_ONLY, lv.HIDDEN]
         self.assertEqual(lv.compare_regions({"PK": results, "US": results}), "Same: 4/4 sampled listings")
 
     def test_equal_totals_can_have_different_listings(self):
-        results = {"PK": [lv.SEARCH, lv.NOT_FOUND], "US": [lv.NOT_FOUND, lv.SEARCH]}
+        results = {"PK": [lv.SEARCH, lv.LINK_ONLY], "US": [lv.LINK_ONLY, lv.SEARCH]}
         self.assertEqual(lv.compare_regions(results), "Different: 2/2 sampled listings; 0 same")
 
     def test_counts_same_and_different_positions(self):
@@ -243,7 +254,7 @@ class RegionComparisonTests(unittest.TestCase):
     def test_errors_are_incomplete_not_regional_differences(self):
         for state in lv.UNVERIFIED_STATES:
             with self.subTest(state=state):
-                results = {"PK": [state, lv.SEARCH], "US": [state, lv.NOT_FOUND]}
+                results = {"PK": [state, lv.SEARCH], "US": [state, lv.LINK_ONLY]}
                 self.assertEqual(lv.compare_regions(results), "Incomplete: 1/2 unverified; 0 same, 1 different")
 
     def test_missing_and_unknown_results_are_incomplete(self):
@@ -261,9 +272,9 @@ class RegionComparisonTests(unittest.TestCase):
     def test_empty_samples_are_not_compared(self):
         self.assertEqual(lv.compare_regions({"PK": [], "US": []}), "Not compared: no sampled listings")
 
-    def test_text_matches_compare_search_outcomes_but_keep_identity_warning(self):
+    def test_text_matches_cannot_verify_regional_agreement(self):
         result = lv.compare_regions({"PK": [lv.SEARCH], "US": [lv.TEXT_MATCH]})
-        self.assertTrue(result.startswith("Same: 1/1"))
+        self.assertTrue(result.startswith("Incomplete: 1/1"))
         self.assertIn("identity unverified", result)
 
     def test_row_columns_write_comparison_and_scope(self):
@@ -276,3 +287,29 @@ class RegionComparisonTests(unittest.TestCase):
         self.assertEqual(lv.owner_buyer_columns(options, has_live=True)["PK vs US"], "Waiting")
         self.assertEqual(lv.owner_buyer_columns(options)["PK vs US"], "Not compared: no live listings")
         self.assertTrue(lv.owner_buyer_columns(lv.BuyerOptions(enabled=False))["PK vs US"].startswith("Not compared:"))
+
+
+class BuyerOnlyTargetTests(unittest.TestCase):
+    def test_parse_exact_ids_and_dedupe(self):
+        value = "Table | Walnut | https://www.facebook.com/marketplace/item/123/?ref=foo\nChair | 456\nChair | 456"
+        self.assertEqual(lv.parse_buyer_targets(value), [
+            {"title": "Table | Walnut", "listingId": "123"}, {"title": "Chair", "listingId": "456"},
+        ])
+
+    def test_reject_untrusted_urls_and_conflicting_titles(self):
+        for value in ("Chair | https://example.com/marketplace/item/123/", "123",
+                      "Chair | https://www.facebook.com/search/?q=/marketplace/item/123/",
+                      "Chair | 456\nDifferent chair | 456"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                lv.parse_buyer_targets(value)
+
+    def test_buyer_only_results_do_not_claim_owner_status(self):
+        values = lv.row_columns(lv.parse_buyer_targets("Chair | 456"), {"US": [lv.SEARCH]}, owner_scanned=False)
+        self.assertIn("owner scan off; seller status not checked", values["Visibility Details"])
+        self.assertNotIn("Live Count", values)
+
+    def test_search_route_requires_actual_query_and_allows_city(self):
+        requested = lv.search_url("Roof repair")
+        self.assertTrue(lv.matches_search_page(requested, requested.replace("/search/", "/seattle/search/")))
+        self.assertFalse(lv.matches_search_page(requested, lv.search_url("Other title")))
+        self.assertFalse(lv.matches_search_page(requested, requested.replace("/marketplace/search/", "/marketplace/")))

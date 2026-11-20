@@ -165,6 +165,43 @@ class LaunchRecoveryTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertNotIn(self.profile, im._uncertain_launches)
 
+    def test_temporary_sync_is_polled_before_a_single_launch(self):
+        ready = {"status": "ok", "url": "ws://127.0.0.1:9222/devtools/browser/a"}
+        logs = []
+        with mock.patch.object(im, "_api_request", side_effect=[
+            response({"status": "Syncing"}), response({"status": "Ready"}),
+            response({"status": "ok", "port": 9222}),
+        ]) as request, mock.patch.object(im.time, "sleep"), \
+             mock.patch.object(im.threading, "Thread", side_effect=self.inline_thread), \
+             mock.patch.object(im, "_ready_profile_cdp", return_value=ready):
+            self.assertTrue(im.start_profile(self.profile, logger_callback=logs.append)[0])
+        self.assertEqual(sum("launch/puppeteer" in call.args[1] for call in request.call_args_list), 1)
+        self.assertTrue(any("waiting briefly" in line for line in logs))
+
+    def test_process_still_open_despite_ready_status_is_not_relaunched(self):
+        with mock.patch.object(im, "_api_request", return_value=response({"status": "Ready"})) as request, \
+             mock.patch.object(im, "_profile_cdp_candidates", return_value=["http://127.0.0.1:9222"]), \
+             mock.patch.object(im, "_begin_launch") as launch:
+            ok, message = im.start_profile(self.profile)
+        self.assertFalse(ok)
+        self.assertTrue(message.startswith("PROFILE_ALREADY_OPEN:"))
+        launch.assert_not_called()
+        request.assert_called_once()
+
+    def test_connection_refusal_fails_fast_but_does_not_replay_an_ambiguous_timeout(self):
+        error = RetryableError("unreachable")
+        error.__cause__ = im.requests.exceptions.ConnectionError("connection refused")
+        attempt = im._LaunchAttempt(error=error)
+        attempt.done.set()
+        im._launch_attempts[self.profile] = attempt
+        with mock.patch.object(im, "_ready_profile_cdp", return_value=None), \
+             mock.patch.object(im.time, "sleep") as sleep:
+            ok, message = im._wait_for_launch(self.profile, attempt, None)
+        self.assertFalse(ok)
+        self.assertIn("before the launch request was delivered", message)
+        self.assertNotIn(self.profile, im._launch_attempts)
+        sleep.assert_not_called()
+
     def test_launch_failure_is_recorded_and_completed_once(self):
         post = {"rowNumber": 8, "_buyer_options": lv.BuyerOptions(pk_profile="pk", us_profile="us")}
         complete = mock.Mock()
@@ -349,6 +386,6 @@ class NavigationRecoveryTests(unittest.TestCase):
         cache = {}
         with mock.patch.object(vc, "_goto", return_value=True), \
              mock.patch.object(vc, "_blocked_reason", return_value="LOGGED_OUT"):
-            self.assertIsNone(vc._search(mock.Mock(), {"title": "Roof", "listingId": "1"},
+            self.assertIsNone(vc._search(mock.Mock(url=lv.search_url("Roof")), {"title": "Roof", "listingId": "1"},
                                          lambda _: None, cache))
         self.assertEqual(cache, {})

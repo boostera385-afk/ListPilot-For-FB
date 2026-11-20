@@ -66,6 +66,7 @@ class BuyerRuntimeTests(unittest.TestCase):
 
     def test_complete_search_query_is_reused_for_repeated_titles(self):
         page = mock.Mock()
+        page.url = lv.search_url("Same title")
         page.evaluate.return_value = [{"href": "/marketplace/item/999/", "text": "Other seller"}]
         cache = {}
         with mock.patch.object(vc, "_goto", return_value=True) as goto, \
@@ -73,6 +74,37 @@ class BuyerRuntimeTests(unittest.TestCase):
             self.assertFalse(vc._search(page, {"title": "Same title", "listingId": "1"}, lambda _: None, cache))
             self.assertFalse(vc._search(page, {"title": "Same title", "listingId": "2"}, lambda _: None, cache))
         goto.assert_called_once()
+
+    def test_keyword_fallback_can_find_an_exact_id_after_a_title_miss(self):
+        target = {"title": "Best Roof Repair Service", "listingId": "123"}
+        with mock.patch.object(vc, "_search", side_effect=["", "ID"]) as search:
+            self.assertEqual(vc._search_with_fallback(mock.Mock(), target, lambda _: None,
+                                                     lambda _: None, {}), "ID")
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(search.call_args.kwargs["query"], "roof repair")
+
+    def test_keyword_failure_is_unverified_and_does_not_become_a_miss(self):
+        target = {"title": "Roof Repair Service", "listingId": "123"}
+        with mock.patch.object(vc, "_search", side_effect=["", None]):
+            self.assertIsNone(vc._search_with_fallback(mock.Mock(), target, lambda _: None,
+                                                       lambda _: None, {}))
+
+    def test_keyword_query_does_not_relax_listing_identity(self):
+        target = {"title": "Roof Repair Service", "listingId": "123", "price": "$50"}
+        page = mock.Mock(url=lv.search_url("roof repair"))
+        page.evaluate.return_value = [{"href": "/marketplace/item/999/", "text": "$50\nRoof Repair Service"}]
+        with mock.patch.object(vc, "_goto", return_value=True), \
+             mock.patch.object(vc, "_blocked_reason", return_value=""):
+            self.assertEqual(vc._search(page, target, lambda _: None, query="roof repair"), "")
+            page.evaluate.return_value = [{"href": "/marketplace/item/123/", "text": "$50\nRoof Repair Service"}]
+            self.assertEqual(vc._search(page, target, lambda _: None, query="roof repair"), "ID")
+
+    def test_title_hit_or_unloaded_title_does_not_launch_keyword_search(self):
+        for result in ("ID", "TEXT", None):
+            with self.subTest(result=result), mock.patch.object(vc, "_search", return_value=result) as search:
+                self.assertEqual(vc._search_with_fallback(mock.Mock(), {"title": "Roof Repair Service"},
+                                                          lambda _: None, lambda _: None, {}), result)
+                search.assert_called_once()
 
     def fake_browser(self):
         runtime = mock.MagicMock()
@@ -113,6 +145,39 @@ class BuyerRuntimeTests(unittest.TestCase):
                 vc.run_visibility_checks(posts, lambda _: None, stop, options=lv.BuyerOptions(pk_profile="pk"))
         start.assert_not_called()
         self.assertEqual(posts[0]["_visibility_cols"]["Visibility"], "STOPPED")
+
+    def test_redirected_search_is_unverified_even_if_the_other_page_has_cards(self):
+        page = mock.Mock(url=lv.search_url("Different title"))
+        with mock.patch.object(vc, "_goto", return_value=True), \
+             mock.patch.object(vc, "_blocked_reason", return_value=""):
+            self.assertIsNone(vc._search(page, {"title": "Roof", "listingId": "123"}, lambda _: None))
+        page.evaluate.assert_not_called()
+
+    def test_profile_cleanup_failure_preserves_verified_buyer_results(self):
+        posts = [{"rowNumber": 4, "_live_listings": [{"state": "LIVE", "title": "Roof", "listingId": "123"}]}]
+        with mock.patch.object(vc, "start_profile", return_value=(True, {"url": "http://127.0.0.1:1"})), \
+             mock.patch.object(vc, "stop_profile", side_effect=RuntimeError("provider unavailable")), \
+             mock.patch.object(vc, "check_listings", return_value=[lv.SEARCH]), \
+             mock.patch.object(vc, "update_column_values", return_value=(True, "OK")):
+            summary = vc.run_visibility_checks(posts, lambda _: None, threading.Event(),
+                                                options=lv.BuyerOptions(pk_profile="pk", us_enabled=False))
+        self.assertEqual(summary, {"OK": 1})
+        self.assertEqual(posts[0]["_visibility_cols"]["PK Check"], "1/1 in search")
+
+    def test_stop_after_last_result_does_not_erase_it(self):
+        stop = threading.Event()
+
+        def sleep(_seconds):
+            if stop.is_set():
+                raise AutomationStopped("Stopped")
+
+        with mock.patch.object(vc, "sync_playwright", return_value=self.fake_browser()), \
+             mock.patch.object(vc, "_goto", return_value=True), \
+             mock.patch.object(vc, "_blocked_reason", return_value=""), \
+             mock.patch.object(vc, "_search", return_value="ID"):
+            results = vc.check_listings("debug", "PK", [{"title": "Roof", "listingId": "123"}],
+                                         lambda _: None, sleep, on_result=stop.set)
+        self.assertEqual(results, [lv.SEARCH])
 
 
 if __name__ == "__main__":

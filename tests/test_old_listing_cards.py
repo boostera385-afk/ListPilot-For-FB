@@ -4,6 +4,9 @@ import unittest
 
 from core.automation import live_checker as lc
 from core.automation import listing_status as ls
+from core.automation import listing_visibility as lv
+from core.automation import visibility_checker as vc
+from core.automation.facebook_page import page_issue
 
 try:
     from playwright.sync_api import sync_playwright
@@ -130,6 +133,91 @@ class OldCardBrowserTests(unittest.TestCase):
         scan = ls.build_scan_result(*lc.read_all_listings_old_ui(self.page, self.sleep))
         self.assertIn("read 1 of 12", "; ".join(scan["notes"]))
 
+    def test_persistent_clear_filters_control_does_not_block_the_owner_scan(self):
+        self.render("""<h1>Your listings</h1>
+          <input aria-label="Search your listings">
+          <button aria-label="Clear filters" onclick="window.resets = (window.resets || 0) + 1">Clear</button>
+          """ + card("Roof repair", "$50"))
+        firsts = lc.read_first_listings_old_ui(self.page, self.sleep, lambda _: None, with_details=False)
+        self.assertIsNotNone(firsts)
+        self.assertEqual(firsts[0]["title"], "Roof repair")
+        self.assertEqual(self.page.evaluate("window.resets"), 1)
+        self.assertTrue(self.page.evaluate(lc._LISTINGS_VIEW_STATE_JS, "Search your listings")["hasClear"])
+
+    def test_filter_reset_ignores_hidden_and_unrelated_clear_buttons(self):
+        self.render("""<button aria-label="Clear filters" style="display:none" onclick="window.wrong = true">Clear</button>
+          <button onclick="window.wrong = true">Clear</button>
+          <button aria-label="Clear filters" onclick="window.reset = true">Clear</button>""")
+        self.assertTrue(self.page.evaluate(lc._CLICK_CLEAR_FILTERS_JS))
+        self.assertIsNone(self.page.evaluate("window.wrong"))
+        self.assertTrue(self.page.evaluate("window.reset"))
+
+    def test_failed_reset_and_remaining_filter_count_are_not_accepted(self):
+        self.render("""<button aria-label="Clear filters" onclick="">Clear</button>
+          <div role="button" aria-label="Filters">Filters (1)</div>""")
+        # No navigation is needed to test the final state; keep the active filter after reset.
+        from unittest import mock
+        with mock.patch.object(self.page, "goto"), mock.patch.object(self.page, "wait_for_selector"):
+            self.assertFalse(lc.ensure_default_listings_view(self.page, self.sleep, lambda _: None))
+        self.render('<button disabled aria-label="Clear filters">Clear</button>')
+        self.assertFalse(self.page.evaluate(lc._CLICK_CLEAR_FILTERS_JS))
+
+    def test_twenty_plus_sidebar_is_a_lower_bound_not_an_exact_total(self):
+        self.render("<h1>Your listings</h1>" + card("Only loaded one", "$50") + "<aside>20+ active listings</aside>")
+        scan = ls.build_scan_result(*lc.read_all_listings_old_ui(self.page, self.sleep))
+        self.assertIn("read 1 of 20", "; ".join(scan["notes"]))
+
+    def test_search_cards_exclude_hidden_sidebar_dialog_and_recommendations(self):
+        self.render("""<main>
+          <h1>Search results</h1>
+          <a href="/marketplace/item/111/">Requested listing</a>
+          <a style="display:none" href="/marketplace/item/222/">Hidden listing</a>
+          <nav><a href="/marketplace/item/333/">Sidebar</a></nav>
+          <div role="dialog"><a href="/marketplace/item/444/">Dialog</a></div>
+          <h2>Suggested listings</h2><a href="/marketplace/item/555/">Recommendation</a>
+        </main>""")
+        cards = self.page.evaluate(vc._SEARCH_RESULTS_JS)
+        self.assertEqual([item["href"] for item in cards], ["/marketplace/item/111/"])
+        self.assertFalse(lv.found_in_search(cards, {"listingId": "555"}))
+
+    def test_listing_identity_notice_is_not_an_account_checkpoint(self):
+        self.render("<h1>Your listings</h1>" + card("Furniture", "$34", "Confirm your identity to publish"))
+        self.assertEqual(page_issue(self.page), "")
+        self.render('<h1>Confirm your identity</h1>')
+        self.assertEqual(page_issue(self.page), "CHECKPOINT")
+        self.render('<input name="email" style="display:none"><h1>Marketplace</h1>')
+        self.assertEqual(page_issue(self.page), "")
+        self.render('<input name="email">')
+        self.assertEqual(page_issue(self.page), "LOGGED_OUT")
+
+    def test_item_text_outside_the_item_heading_does_not_verify_link(self):
+        self.render("<main><h1>Loading</h1><div>Roof repair</div></main>")
+        headings = self.page.evaluate(vc._ITEM_HEADINGS_JS)
+        url = "https://www.facebook.com/marketplace/item/111/"
+        self.assertEqual(lv.classify_item_page(url, headings, "Roof repair", url), lv.UNCLEAR)
+
+    def test_table_scrolls_and_resets_an_inner_panel(self):
+        self.render("""<div id="panel" style="height:200px;overflow:auto">
+          <table aria-label="Your listings"><tbody>
+          <tr role="row" style="height:220px"><td>First</td></tr>
+          <tr role="row" style="height:220px"><td>Last</td></tr>
+          </tbody></table></div>""")
+        self.page.evaluate(lc._SCROLL_LISTINGS_JS)
+        self.assertGreater(self.page.locator("#panel").evaluate("el => el.scrollTop"), 0)
+        lc._scroll_to_top(self.page)
+        self.assertEqual(self.page.locator("#panel").evaluate("el => el.scrollTop"), 0)
+
+    def test_new_table_reads_duplicate_notice_before_generic_active_status(self):
+        self.render("""<table aria-label="Your listings"><tbody><tr role="row" data-index="0">
+          <td role="gridcell" aria-colindex="2"><div>
+          <a aria-label="View listing: Chair" href="/marketplace/item/123456/">Chair</a></div>
+          <div>Category: Home</div><div>This looks like a duplicate so we didn't post it</div><div>Active</div></td>
+          <td role="gridcell" aria-colindex="3">$34</td></tr></tbody></table>""")
+        row = self.page.evaluate(lc._READ_LISTINGS_TABLE_JS)[0]
+        listing = lc._listing_from_row(row, "All listings")
+        self.assertEqual(listing["state"], ls.REJECTED)
+        self.assertEqual(ls.build_scan_result([listing])["duplicates"], 1)
+
     def test_nested_scroll_panel_loads_all_cards(self):
         markup = [card(f"Nested {i}", "$50") for i in range(12)]
         self.render("<style>body{overflow:hidden}</style><h1>Your listings</h1>"
@@ -154,6 +242,52 @@ class OldCardBrowserTests(unittest.TestCase):
         scan = ls.build_scan_result(*lc.read_all_listings_old_ui(self.page, self.sleep))
         self.assertEqual(scan["total"], 3)
         self.assertEqual(scan["duplicates"], 0)  # repetition alone is not a Facebook duplicate rejection
+
+    def test_buyer_ids_are_recovered_from_each_selected_cards_own_dialog(self):
+        self.render("<h1>Your listings</h1>" + card("Roof repair service", "$50") +
+                    card("Furniture assembly service", "$40") + card("Unselected", "$10"))
+        cards = self.page.evaluate(lc._READ_CARDS_JS, lc.SECTION_ALL_LISTINGS)
+        listings = [dict(lc.parse_old_card(c), state=ls.LIVE, listingId="", cardId=c["cardId"])
+                    for c in cards]
+        self.page.evaluate("""() => {
+          document.querySelectorAll('[data-lp-card]').forEach((card, i) => {
+            card.addEventListener('click', () => {
+              const dialog = document.createElement('div');
+              dialog.setAttribute('role', 'dialog');
+              const link = document.createElement('a');
+              link.href = '/marketplace/item/' + (1234560 + i) + '/';
+              link.textContent = card.querySelector('[data-lp-title]').innerText;
+              dialog.appendChild(link);
+              dialog.insertAdjacentHTML('beforeend',
+                '<a href="/marketplace/item/9999999/">Unrelated recommendation</a>' +
+                '<button role="button" aria-label="Close">Close</button>');
+              dialog.querySelector('button').onclick = () => dialog.remove();
+              document.body.appendChild(dialog);
+            });
+          });
+        }""")
+        lc.recover_old_sample_ids(self.page, listings, 2, self.sleep, lambda _: None)
+        self.assertEqual([item["listingId"] for item in listings], ["1234560", "1234561", ""])
+        self.assertEqual(self.page.locator('[role="dialog"]').count(), 0)
+
+    def test_ambiguous_dialog_links_do_not_assign_a_listing_id(self):
+        self.render("""<div role="dialog">
+          <a href="/marketplace/item/1234560/">Roof repair</a>
+          <a href="/marketplace/item/1234561/">Roof repair</a>
+          <a href="https://example.com/marketplace/item/1234562/">Roof repair</a>
+          </div>""")
+        links = self.page.evaluate(lc._OLD_DIALOG_ITEM_LINK_JS, "Roof repair")
+        ids = {lv.item_id_from_href(link) for link in links} - {""}
+        self.assertEqual(ids, {"1234560", "1234561"})
+
+    def test_existing_dialog_cannot_supply_another_cards_id(self):
+        self.render("<h1>Your listings</h1>" + card("Roof repair", "$50"))
+        selected = self.page.evaluate(lc._READ_CARDS_JS, lc.SECTION_ALL_LISTINGS)[0]
+        listing = dict(lc.parse_old_card(selected), state=ls.LIVE, listingId="", cardId=selected["cardId"])
+        self.page.evaluate("""() => document.body.insertAdjacentHTML('beforeend',
+          '<div role="dialog"><a href="/marketplace/item/9999999/">Roof repair</a></div>')""")
+        lc.recover_old_sample_ids(self.page, [listing], 1, self.sleep, lambda _: None)
+        self.assertEqual(listing["listingId"], "")
 
 
 if __name__ == "__main__":

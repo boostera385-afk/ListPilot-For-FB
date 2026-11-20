@@ -118,3 +118,42 @@ Measured: owner scan 2m 09s (the full scan itself took 1m 14s), buyer pass 1m 05
 | 4 | The patient end-of-feed wait added about 12 s per profile. | After one quiet window the scan jumps to the bottom, where a loader triggers, and stops if that is quiet too (about 7 s). |
 
 Seeing a PK error again: open the PK profile by hand and look at the screenshot in `debug/`. If the account really is logged out or at a checkpoint, fix that first.
+
+## 10. November 20: false `LAYOUT_UNKNOWN` with visible listings
+
+The linked Live Checker sheet showed two failed owner scans, and the app logged
+`Listings found: No listings`. The saved screenshot visibly contained seller cards.
+Direct inspection of the real older layout reproduced the cause: **Clear filters**
+remains enabled in the default sidebar. After clicking it, the checker incorrectly
+required the button to disappear.
+
+- Reset filters once, then check remaining search/filter indicators; persistent Clear
+  alone no longer blocks the scan. Hidden/unrelated Clear buttons are ignored.
+- Failed owner scans now report an **unknown/incomplete** count, not a verified zero.
+- The sidebar's `20+ active listings` is checked as a lower bound rather than ignored.
+- Older cards often have no item links until opened. Only the selected buyer-sample
+  cards are opened to recover title-matching, unambiguous item links from their own
+  dialogs. Missing/ambiguous links stay unverified; a stale dialog is not reused.
+- Buyer searches try the title and, on a miss, a normalized keyword fallback. Only
+  an exact ID in search counts as verified. Keywords do not change the saved city/radius;
+  adding ZIP text to a query is not a geographic filter.
+
+Read-only live verification after the fix (sheet/history writes intercepted):
+
+| Seller | Live | Rejected | Total |
+|---|---:|---:|---:|
+| `19 june id 6` | 64 | 2 | 66 |
+| `19 june id 7` | 54 | 5 | 59 |
+
+These are owner-side publication states, not proof of buyer search visibility.
+The old checkpoint finding for `19 june id 6` is historical; this verification
+successfully read its seller page.
+
+All **six** selected seller-card IDs were recovered (three per seller). Both
+configured buyers then checked the same six IDs. All **12 buyer outcomes were
+`LINK_ONLY`**: the exact item pages opened with the expected title, but the IDs
+were not observed in the bounded title/keyword searches. Neither seller was
+shown to be banned or globally hidden. The buyer pass took **153 seconds**,
+including buyer startup; the actual saved city/radius still needs checking near
+the listing location before drawing a local-search conclusion. No sheet cells
+or history rows were changed during this verification.

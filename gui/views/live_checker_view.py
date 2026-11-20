@@ -2,7 +2,7 @@ import customtkinter as ctk
 import threading
 import time
 from core.engine.grouped_automation_engine import GroupedAutomationEngine
-from core.services.sheets_service import fetch_pending_rows, reset_rows_for_recheck, update_row_status
+from core.services.sheets_service import claim_row, fetch_pending_rows, reset_rows_for_recheck, update_row_status
 from core.utils.queue_rows import split_duplicate_rows
 from core.automation.browser_manager import (
     is_incogniton_running, launch_incogniton, wait_for_incogniton_ready, provider_label, resolve_profile_id,
@@ -61,6 +61,13 @@ def _profile_name(post):
     return str(post.get("profile name") or post.get("Profile Name") or post.get("profileName") or post.get("id") or "?")
 
 
+def _owner_summary(counts, issues):
+    if issues and not counts:
+        return "Listing count unknown — owner scans incomplete"
+    summary = format_counts(counts)
+    return summary + " (incomplete — some owner scans failed or were partial)" if issues else summary
+
+
 class LiveCheckerView(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -105,7 +112,7 @@ class LiveCheckerView(ctk.CTkFrame):
                      anchor="w").grid(row=0, column=0, sticky="w")
         self.header_desc = ctk.CTkLabel(
             header, anchor="w", justify="left", font=theme.font(13), text_color=theme.TEXT_MUTED,
-            text="Scan seller listings, then optionally spot-check buyer visibility. Buyer switches and sample size are in Settings.",
+            text="Scan sellers and/or verify Marketplace search as a buyer. Owner/PK/US switches and sample size are in Settings.",
             wraplength=900,
         )
         self.header_desc.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
@@ -246,7 +253,8 @@ class LiveCheckerView(ctk.CTkFrame):
             display_formatters={"Visibility": lv.visibility_label, "Result": lambda code: {
                 "OK": "Scanned", "PARTIAL": "Partial scan", "CHECKPOINT": "Account check",
                 "LAYOUT_UNKNOWN": "Layout unread", "LOGGED_OUT": "Login needed",
-                "PROFILE_START_FAILED": "Launch failed",
+                 "PROFILE_START_FAILED": "Launch failed", "OWNER_OFF": "Owner off",
+                 "SHEET_WRITE_FAILED": "Not saved to Sheets",
             }.get(str(code), str(code))},
         )
         self.table.grid(row=0, column=0, sticky="nsew", padx=6, pady=(0, 6))
@@ -391,11 +399,14 @@ class LiveCheckerView(ctk.CTkFrame):
         for state, count in counts.items():
             self.totals[state] = self.totals.get(state, 0) + count
         code = post.get("_live_check") or ("OK" if success else "FAILED")
-        if code != "OK":
+        if code not in ("OK", "NO_LISTINGS", "OWNER_OFF"):
             self.owner_issues += 1
         verified = "_live_counts" in post or code == "NO_LISTINGS"
         buyers = lv.owner_buyer_columns(self.run_options, bool(counts.get("LIVE")),
                                        owner_failed=not verified)
+        buyers.update(post.get("_visibility_cols") or {})
+        if code == "OWNER_OFF":
+            buyers = lv.owner_buyer_columns(self.run_options, has_live=True)
         self.table.upsert(post.get("rowNumber") or _profile_name(post), {
             "Profile": _profile_name(post),
             "Result": code.split(":")[0],
@@ -429,12 +440,12 @@ class LiveCheckerView(ctk.CTkFrame):
             if not values:
                 continue
             code = values.get("Visibility", "")
-            if code != "OK":
+            if code != "OK" or post.get("_visibility_saved") is False:
                 self.visibility_issues += 1
             pk = values.get(lv.checker_column("PK"), "—")
             us = values.get(lv.checker_column("US"), "—")
             self.table.upsert(post.get("rowNumber") or _profile_name(post), {
-                "PK": pk, "US": us, "Visibility": code,
+                "PK": pk, "US": us, "Visibility": code if post.get("_visibility_saved") is not False else "Not saved to Sheets",
             }, colors={"Visibility": theme.status_color(code)})
             self._show_buyer_rows(post)
         self.stats["hidden"].set(self.visibility_issues)
@@ -447,7 +458,7 @@ class LiveCheckerView(ctk.CTkFrame):
             states = [item[label] for label in ("PK", "US") if label in item]
             verdict = lv.listing_verdict(states)
             color = (theme.GREEN if verdict.startswith("Visible in search")
-                     else theme.RED if verdict.startswith("Hidden") else theme.AMBER)
+                     else theme.RED if verdict.startswith("Item unavailable") else theme.AMBER)
             self.buyer_table.upsert(f"{post.get('rowNumber') or _profile_name(post)}-{index}", {
                 "Profile": _profile_name(post),
                 "Listing": item.get("title") or "Untitled",
@@ -495,6 +506,12 @@ class LiveCheckerView(ctk.CTkFrame):
 
         def toast(message, color):
             run_on_ui(Toast.show, self, message, color)
+
+        if not self.run_options.owner_enabled and not self.run_options.checkers:
+            logger_proxy("No checks enabled: enable the owner scan or configure at least one enabled buyer.")
+            toast("Enable at least one check in Settings.", theme.AMBER)
+            self._finish_idle()
+            return
 
         try:
             # Rows left as CLAIMED by a crashed run (over an hour old) are queued again.
@@ -564,6 +581,10 @@ class LiveCheckerView(ctk.CTkFrame):
         for post in posts:
             post["_buyer_options"] = self.run_options
 
+        if not self.run_options.owner_enabled:
+            self._run_buyers_only(posts, logger_proxy, master_ui_context)
+            return
+
         concurrency = min(concurrency, len(posts))
         self._phase = "Owner scan"
         logger_proxy(f"Buyer plan: {', '.join(label for label, _ in self.run_options.checkers) or 'Off'}; "
@@ -596,7 +617,7 @@ class LiveCheckerView(ctk.CTkFrame):
                 for state, count in (post.get("_live_counts") or {}).items():
                     totals[state] = totals.get(state, 0) + count
                 code = post.get("_live_check") or ("OK" if success else "FAILED")
-                if code and code != "OK":
+                if code and code not in ("OK", "NO_LISTINGS"):
                     issues[code] = issues.get(code, 0) + 1
             run_on_ui(self._on_profile_done, post, success)
             run_on_ui(self.update_start_button)
@@ -604,7 +625,7 @@ class LiveCheckerView(ctk.CTkFrame):
         def on_finished():
             run_on_ui(self.append_log, "--- All Live Checks Completed ---")
             with totals_lock:
-                run_on_ui(self.append_log, f"Listings found: {format_counts(totals)}")
+                run_on_ui(self.append_log, f"Listings found: {_owner_summary(totals, issues)}")
                 if issues:
                     run_on_ui(self.append_log, "Profiles with issues: " + ", ".join(f"{n} {c}" for c, n in sorted(issues.items())))
             attention = sum(issues.values())
@@ -621,7 +642,10 @@ class LiveCheckerView(ctk.CTkFrame):
                                        f"buyer sample {format_duration(max(0, total_seconds - owner_seconds))})")
             self.is_processing = False
             run_on_ui(self.update_start_button)
-            toast(f"Live check finished: {format_counts(totals)}", theme.GREEN if not issues else theme.AMBER)
+            buyer_issues = any(post.get("_visibility", "OK") != "OK" or post.get("_visibility_saved") is False
+                               for post in posts)
+            toast(f"Live check finished: {_owner_summary(totals, issues)}",
+                  theme.AMBER if issues or buyer_issues else theme.GREEN)
 
         self._run_engine_thread(posts, flow_wrapper, logger_proxy, on_completion, on_finished, master_ui_context)
 
@@ -644,12 +668,18 @@ class LiveCheckerView(ctk.CTkFrame):
                                              detail=lambda *args: run_on_ui(self._buyer_detail, *args))
             if summary:
                 logger_proxy("Visibility: " + ", ".join(f"{n} {c}" for c, n in sorted(summary.items())))
-                notes = any(code != "OK" for code in summary)
+                notes = any(code != "OK" for code in summary) or any(
+                    post.get("_visibility_saved") is False for post in posts)
                 run_on_ui(self.step2.finish, "Sample complete" + (" · see results" if notes else ""),
                           theme.AMBER if notes else theme.GREEN)
             else:
-                logger_proxy("Visibility check: no LIVE listings to verify.")
-                run_on_ui(self.step2.finish, "No LIVE listings")
+                failed = any(post.get("_live_check") not in ("OK", "NO_LISTINGS", "OWNER_OFF")
+                             for post in posts)
+                logger_proxy("Visibility not checked: owner scans failed or were incomplete; no usable targets. "
+                             "This does not mean there are no listings." if failed else
+                             "Visibility check: no searchable listing targets to verify.")
+                run_on_ui(self.step2.finish, "Not checked — owner scan incomplete" if failed else "No searchable targets",
+                          theme.AMBER if failed else theme.TEXT_MUTED)
         except AutomationStopped:
             logger_proxy("Visibility check stopped by user.")
             run_on_ui(lambda: self.step2.counter.configure(text="Stopped"))
@@ -660,7 +690,63 @@ class LiveCheckerView(ctk.CTkFrame):
             run_on_ui(self._on_visibility_done, posts)
             run_on_ui(self.update_start_button)
 
-    def _run_engine_thread(self, posts, flow_wrapper, logger_proxy, on_completion, on_finished, master_ui_context):
+    def _run_buyers_only(self, posts, log, master_ui_context):
+        """Use explicit inputs; never open the seller or overwrite prior owner counts."""
+        try:
+            prepared = []
+            for post in posts:
+                row = post.get("rowNumber")
+                try:
+                    targets = lv.parse_buyer_targets(post.get(lv.BUYER_TARGETS_COLUMN))
+                except ValueError as exc:
+                    log(f"Row {row} left pending: {exc}")
+                    continue
+                if not row or not targets:
+                    log(f"Row {row} left pending: add title | Marketplace item URL to '{lv.BUYER_TARGETS_COLUMN}'.")
+                    continue
+                prepared.append((post, targets))
+            if not prepared or not self._ensure_browser_ready(log):
+                return
+            claimed = []
+            for post, targets in prepared:
+                row = post["rowNumber"]
+                try:
+                    ok, reason = claim_row(LIVE_CHECKER_SHEET, row)
+                except Exception as exc:
+                    ok, reason = False, str(exc)
+                if not ok:
+                    log(f"Row {row} skipped: could not claim it ({reason}).")
+                    continue
+                post["_buyer_targets"] = targets
+                post["_live_check"] = "OWNER_OFF"
+                claimed.append(post)
+            if not claimed:
+                return
+            try:
+                self.total_count = len(claimed)
+                log(f"Owner scan off: checking provided targets for {len(claimed)} seller row(s). Owner counts unchanged.")
+                for post in claimed:
+                    run_on_ui(self._on_profile_done, post, True)
+                run_on_ui(lambda: self.other_summary.configure(text="Owner off — listing counts were not refreshed."))
+                run_on_ui(self.step1.reset, "Off")
+                self._run_visibility_pass(claimed, log, master_ui_context)
+            finally:
+                for post in claimed:
+                    row = post["rowNumber"]
+                    code = post.get("_visibility", "").split(":")[0]
+                    status = ("Failed: buyer-only run stopped" if code == "STOPPED" else
+                              "Success: buyer-only check" if post.get("_visibility_saved") else
+                              "Failed: buyer results not saved")
+                    try:
+                        ok, message = update_row_status(LIVE_CHECKER_SHEET, row, status)
+                        if not ok:
+                            log(f"Row {row}: could not save queue status ({message}).")
+                    except Exception as exc:
+                        log(f"Row {row}: could not save queue status ({exc}).")
+        finally:
+            self._finish_idle()
+
+    def _ensure_browser_ready(self, logger_proxy):
         label = provider_label()
 
         try:
@@ -670,21 +756,23 @@ class LiveCheckerView(ctk.CTkFrame):
                 if not launched:
                     logger_proxy(f"Failed to launch {label}: {launch_msg}")
                     run_on_ui(Toast.show, self, f"Could not launch {label}.", theme.RED)
-                    self._finish_idle()
-                    return
+                    return False
 
             logger_proxy(f"Verifying that the {label} API is ready...")
             ready, ready_msg = wait_for_incogniton_ready(timeout=60, logger_callback=logger_proxy)
             if not ready:
                 logger_proxy(f"{label} did not become ready: {ready_msg}")
                 run_on_ui(Toast.show, self, f"{label} is not ready.", theme.RED)
-                self._finish_idle()
-                return
+                return False
         except Exception as exc:
             logger_proxy(f"Failed while preparing {label}: {exc}")
+            return False
+        return True
+
+    def _run_engine_thread(self, posts, flow_wrapper, logger_proxy, on_completion, on_finished, master_ui_context):
+        if not self._ensure_browser_ready(logger_proxy):
             self._finish_idle()
             return
-
         started = self.engine.start(
             task_type=LIVE_CHECKER_SHEET,
             posts=posts,

@@ -25,8 +25,8 @@ class ClassifyStatusTests(unittest.TestCase):
                                            "This looks like a duplicate so we didn't post it"), ls.REJECTED)
 
     def test_needs_attention_tab_is_never_live(self):
-        self.assertEqual(ls.classify_status("Needs attention", "Active"), ls.REJECTED)
-        self.assertEqual(ls.classify_status("Needs attention", ""), ls.REJECTED)
+        self.assertEqual(ls.classify_status("Needs attention", "Active"), ls.ACTION_REQUIRED)
+        self.assertEqual(ls.classify_status("Needs attention", ""), ls.ACTION_REQUIRED)
 
     def test_in_review_inside_needs_attention_stays_pending(self):
         self.assertEqual(ls.classify_status("Needs attention", "In review"), ls.PENDING)

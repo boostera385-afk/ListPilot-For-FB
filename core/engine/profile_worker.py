@@ -110,7 +110,7 @@ class ProfileWorker:
                                          stop_event=self._stop_event)
             
             if not started:
-                if str(data).startswith(("PROFILE_ALREADY_OPEN:", "PROFILE_LAUNCH_PENDING:")):
+                if str(data).startswith(("PROFILE_ALREADY_OPEN:", "PROFILE_LAUNCH_PENDING:", "PROFILE_LAUNCH_REJECTED:")):
                     raise PermanentError(str(data))
                 raise RetryableError(f"Failed to start profile: {data}")
 

@@ -11,6 +11,7 @@ from core.utils.smart_match import loose_key
 from core.utils import layout_memory
 from core.automation import listing_status as ls
 from core.automation import listing_visibility as lv
+from core.automation.facebook_page import page_issue
 from core.config import load_config
 
 FB_MARKETPLACE_HOME = "https://www.facebook.com/marketplace/?ref=bookmark"
@@ -407,6 +408,8 @@ _READ_LISTINGS_TABLE_JS = r"""
     const categoryLine = lines.find((line) => /^category:/i.test(line)) || '';
     const last = lines.length > 1 ? lines[lines.length - 1] : '';
     const status = last && last !== title && !/^category:/i.test(last) ? last : '';
+    const reason = lines.find(line => line !== title &&
+      /^(we(?:'ve| have)? rejected|this listing (?:goes against|was rejected)|this looks like a duplicate|confirm your identity|verify your identity)/i.test(line)) || '';
     // Any link in the row may carry the listing ID (listing_id=, item_id= or /marketplace/item/<id>).
     let listingId = '';
     for (const a of row.querySelectorAll('a[href]')) {
@@ -418,6 +421,7 @@ _READ_LISTINGS_TABLE_JS = r"""
       title: title,
       category: categoryLine.replace(/^category:\s*/i, ''),
       status: status,
+      reason: reason,
       price: cellText(row, col.price),
       clicks: cellText(row, col.clicks),
       saves: cellText(row, col.saves),
@@ -608,7 +612,8 @@ _LISTINGS_VIEW_STATE_JS = r"""
   const sorted = Array.from(document.querySelectorAll('table[aria-label="Your listings"] th[aria-sort]'))
     .map((th) => th.getAttribute('aria-sort')).filter((v) => v && v !== 'none');
   const clearButton = Array.from(document.querySelectorAll('[role="button"], button')).find((b) =>
-    /^(clear( all)?( filters)?|reset( filters)?)$/i.test(clean(b.getAttribute('aria-label') || b.innerText))
+    b.getClientRects().length && !b.disabled && b.getAttribute('aria-disabled') !== 'true' &&
+    /^(?:clear(?: all)? filters|reset filters)$/i.test(clean(b.getAttribute('aria-label') || b.innerText))
   );
   return {
     search: search ? search.value : '',
@@ -623,7 +628,8 @@ _CLICK_CLEAR_FILTERS_JS = r"""
 () => {
   const clean = (v) => (v || '').replace(/\s+/g, ' ').trim();
   const button = Array.from(document.querySelectorAll('[role="button"], button')).find((b) =>
-    /^(clear( all)?( filters)?|reset( filters)?)$/i.test(clean(b.getAttribute('aria-label') || b.innerText))
+    b.getClientRects().length && !b.disabled && b.getAttribute('aria-disabled') !== 'true' &&
+    /^(?:clear(?: all)? filters|reset filters)$/i.test(clean(b.getAttribute('aria-label') || b.innerText))
   );
   if (!button) return false;
   button.click();
@@ -662,8 +668,9 @@ def ensure_default_listings_view(
     try:
         state = page.evaluate(_LISTINGS_VIEW_STATE_JS, search_label) or {}
     except Exception:
-        return
+        return False
     changed = False
+    filters_reset = False
 
     if _clean(state.get("search")):
         log(f"Clearing the listings search box ('{_clean(state.get('search'))}')...")
@@ -676,9 +683,12 @@ def ensure_default_listings_view(
             pass
 
     if state.get("hasClear"):
-        log("A listings filter is applied. Clearing it...")
+        # The older sidebar always renders an enabled "Clear filters" control,
+        # including after a reset. Its presence alone is not an active filter.
+        log("Resetting listing filters (Clear may also appear in the default view)...")
         try:
-            changed = bool(page.evaluate(_CLICK_CLEAR_FILTERS_JS)) or changed
+            filters_reset = bool(page.evaluate(_CLICK_CLEAR_FILTERS_JS))
+            changed = filters_reset or changed
         except Exception:
             pass
 
@@ -698,6 +708,13 @@ def ensure_default_listings_view(
             page.wait_for_selector(items_selector, timeout=8000)
         except Exception:
             pass
+    try:
+        state = page.evaluate(_LISTINGS_VIEW_STATE_JS, search_label) or {}
+        filter_count = re.search(r"\d+", state.get("filtersText") or "")
+        return not (_clean(state.get("search")) or (state.get("hasClear") and not filters_reset) or
+                    (filter_count and int(filter_count.group(0)) > 0))
+    except Exception:
+        return False
 
 
 def _back_to_listings_table(page, sleep):
@@ -845,11 +862,13 @@ _SCROLL_OLD_FEED_JS = r"""
 """
 
 
-def _wait_for_feed_growth(page, known_markers, sleep, window):
+def _wait_for_feed_growth(page, known_markers, sleep, window, deadline=None):
     """Wait up to ``window`` s for the feed to add cards; extends while a loading spinner shows."""
     waited, extensions = 0.0, 0
     while waited < window:
-        sleep(0.5)
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        sleep(min(0.5, max(0, deadline - time.monotonic())) if deadline is not None else 0.5)
         waited += 0.5
         try:
             if page.evaluate(_OLD_MARKER_COUNT_JS) > known_markers:
@@ -921,7 +940,7 @@ def read_old_section(page, section_name, sleep, collect_all=False, deadline=None
             page.evaluate(_SCROLL_OLD_FEED_JS, [section_name, to_bottom])
         except Exception:
             break
-        _wait_for_feed_growth(page, known, sleep, window)
+        _wait_for_feed_growth(page, known, sleep, window, deadline)
     return list(collected.values())
 
 
@@ -975,13 +994,15 @@ def read_first_listings_old_ui(page, sleep, log, with_details=True):
         )
     except Exception:
         return None
-    ensure_default_listings_view(
+    if ensure_default_listings_view(
         page, sleep, log,
         url=FB_MARKETPLACE_SELLING,
         search_label="Search your listings",
         ready_selector=", ".join(_old_heading_selector(title) for title in (SECTION_ALL_LISTINGS, "Your listings")),
         items_selector=_OLD_CARD_SELECTOR,
-    )
+    ) is False:
+        log("Cannot confirm the older listings view is unfiltered.")
+        return None
     try:
         page.wait_for_selector(_OLD_CARD_SELECTOR, timeout=8000)
     except Exception:
@@ -1028,9 +1049,16 @@ _SCROLL_LISTINGS_JS = r"""
 () => {
   const rows = document.querySelectorAll('table[aria-label="Your listings"] tbody tr[role="row"]');
   const last = rows[rows.length - 1];
-  const before = window.scrollY;
+  let panel = last ? last.parentElement : null;
+  while (panel && panel !== document.body) {
+    if (panel.scrollHeight > panel.clientHeight + 20 &&
+        /auto|scroll/.test(getComputedStyle(panel).overflowY)) break;
+    panel = panel.parentElement;
+  }
+  const scroller = panel && panel !== document.body ? panel : document.scrollingElement;
+  const before = scroller.scrollTop;
   if (last) last.scrollIntoView({block: 'end'});
-  if (window.scrollY === before) window.scrollBy(0, Math.max(200, window.innerHeight * 0.8));
+  if (scroller.scrollTop === before) scroller.scrollTop += Math.max(200, scroller.clientHeight * 0.8);
 }
 """
 
@@ -1072,7 +1100,14 @@ def _tab_badge(text):
 
 def _scroll_to_top(page):
     try:
-        page.evaluate("() => window.scrollTo(0, 0)")
+        page.evaluate(r"""() => {
+          for (const root of document.querySelectorAll('table[aria-label="Your listings"],[data-lp-card]')) {
+            for (let panel = root.parentElement; panel && panel !== document.body; panel = panel.parentElement) {
+              if (panel.scrollTop && /auto|scroll/.test(getComputedStyle(panel).overflowY)) panel.scrollTop = 0;
+            }
+          }
+          window.scrollTo(0, 0);
+        }""")
     except Exception:
         pass
 
@@ -1116,13 +1151,14 @@ def _listing_from_row(row, label):
     return {
         "title": _clean(row.get("title")),
         "status": _clean(row.get("status")),
+        "reason": _clean(row.get("reason")),
         "price": _clean(row.get("price")),
-        "index": row.get("index") or "",
+        "index": row.get("index") if row.get("index") is not None else "",
         "listingId": _clean(row.get("listingId")),
         "clicksCount": parse_count(row.get("clicks")),
         "messagesCount": parse_count(row.get("messages")),
         "tab": label,
-        "state": ls.classify_status(label, row.get("status")),
+        "state": ls.classify_status(label, row.get("status"), row.get("reason")),
     }
 
 
@@ -1145,6 +1181,8 @@ def read_all_listings(page, sleep, log):
     tabs.sort(key=_is_active_tab)
     active_id = next((tab["id"] for tab in tabs if _is_active_tab(tab)), "active")
     listings, tab_counts, notes, previous = [], {}, [], None
+    if not tabs:
+        notes.append("no readable status tabs were found")
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
     for tab in tabs:
         label, badge = _tab_label(tab["text"]), _tab_badge(tab["text"])
@@ -1170,6 +1208,8 @@ def read_all_listings(page, sleep, log):
         previous = signature or previous
         tab_counts[label] = badge if badge is not None else len(rows)
         listings.extend(_listing_from_row(row, label) for row in rows)
+        if not rows and badge is None:
+            notes.append(f"'{label}' tab returned no rows and did not show a zero count")
         warning = ls.tab_total_mismatch({label: badge}, rows) if badge else None
         if warning:
             log(f"Note: '{label}' tab: {warning}.")
@@ -1208,16 +1248,76 @@ def read_all_listings_old_ui(page, sleep):
     # The sidebar count is a lower bound, not a substitute for reading cards.
     try:
         claimed = page.evaluate(r"""() => {
-            const match = document.body.innerText.match(/\b(\d[\d,]*) active listings\b/i);
+            const match = document.body.innerText.match(/\b(\d[\d,]*)\+?\s+active listings\b/i);
             return match ? Number(match[1].replace(/,/g, '')) : 0;
         }""")
-        warning = ls.tab_total_mismatch({"Marketplace profile": claimed}, ls.dedupe_listings(listings))
+        active = [item for item in ls.dedupe_listings(listings) if item["state"] in (ls.LIVE, ls.PENDING)]
+        warning = ls.tab_total_mismatch({"Marketplace profile": claimed}, active)
         if warning:
             notes.append(warning)
     except Exception:
         pass
     _scroll_to_top(page)
     return listings, tab_counts, notes
+
+
+_OLD_DIALOG_ITEM_LINK_JS = r"""
+(expectedTitle) => {
+  const clean = value => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const links = [];
+  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+    if (!dialog.getClientRects().length) continue;
+    for (const a of dialog.querySelectorAll('a[href*="/marketplace/item/"]')) {
+      if (a.getClientRects().length &&
+          (a.innerText || '').split('\n').some(line => clean(line) === clean(expectedTitle)))
+        links.push(a.getAttribute('href'));
+    }
+  }
+  return links;
+}
+"""
+
+
+def recover_old_sample_ids(page, listings, limit, sleep, log):
+    """Read item links from only the sampled cards' own dialogs, never guess IDs by title."""
+    sample, _ = lv.visibility_targets(listings, limit)
+    for target in sample:
+        card_id = str(target.get("cardId") or "")
+        if target.get("listingId") or not re.fullmatch(r"\d+", card_id):
+            continue
+        start_url = page.url
+        opened = False
+        try:
+            if page.locator('[role="dialog"]:visible').count():
+                log("An existing dialog is still open; skipping ID recovery rather than reusing its item link.")
+                continue
+            card = page.locator(f'[data-lp-card-id="{card_id}"]')
+            title = card.locator('[data-lp-title]').first
+            if not title.count() or not _same_title(title.inner_text(timeout=2000), target["title"]):
+                continue
+            log(f"Reading the exact item ID for buyer sample '{target['title']}'...")
+            title.click(timeout=5000)
+            opened = True
+            for _ in range(10):
+                sleep(0.5)
+                links = page.evaluate(_OLD_DIALOG_ITEM_LINK_JS, target["title"]) or []
+                ids = {lv.item_id_from_href(link) for link in links} - {""}
+                if len(ids) == 1:
+                    listing_id = ids.pop()
+                    for item in listings:
+                        if str(item.get("cardId") or "") == card_id:
+                            item["listingId"] = listing_id
+                    log(f"Buyer target ID confirmed from its seller card: {listing_id}.")
+                    break
+            else:
+                log("No unambiguous item link in this card's dialog; buyer identity remains unverified.")
+        except AutomationStopped:
+            raise
+        except Exception as exc:
+            log(f"Could not read this sample's item ID; left unverified: {str(exc).splitlines()[0]}")
+        finally:
+            if opened:
+                _back_to_selling_page(page, sleep, start_url)
 
 
 # --- Diagnostics and navigation fallback --------------------------------------
@@ -1302,29 +1402,10 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             time.sleep(seconds)
 
     def is_logged_out(page):
-        try:
-            for sel in ('input[name="email"]', "#email", 'input[name="pass"]'):
-                if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
-                    return True
-        except Exception:
-            pass
-        return False
+        return page_issue(page) == ls.LOGGED_OUT
 
     def has_checkpoint(page):
-        texts = [
-            "Confirm your identity",
-            "Confirm you're a real person",
-            "Account restricted",
-            "We suspended your account",
-            "Your account has been locked",
-        ]
-        for text in texts:
-            try:
-                if page.get_by_text(text, exact=False).first.is_visible():
-                    return True
-            except Exception:
-                pass
-        return False
+        return page_issue(page) == ls.CHECKPOINT
 
     row_number = post.get("rowNumber")
     target_sheet = post.get("_target_sheet", LIVE_CHECKER_SHEET)
@@ -1334,15 +1415,17 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         return lv.owner_buyer_columns(options, has_live, owner_failed) if target_sheet == LIVE_CHECKER_SHEET else {}
 
     def write_columns(values):
-        """One batched sheet write; failures are logged, never fatal."""
+        """Report whether the current scan was saved, separately from what was read."""
         if not row_number:
-            return
+            return True
         try:
             saved, message = update_column_values(target_sheet, row_number, values)
             if not saved:
                 log(f"Note: could not save some sheet columns ({message}).")
+            return saved
         except Exception as exc:
             log(f"Note: could not save the sheet columns: {exc}")
+            return False
 
     def record_history(check, scan=None):
         if not row_number:
@@ -1393,15 +1476,28 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         post["_live_check"] = code
         raise PermanentError(result)
 
-    def save_results(all_summary, needs_summary, scan):
+    responses = None
+
+    def save_results(all_summary, needs_summary, scan, confirmed_empty=False):
         log(f"All listings: {all_summary}")
         log(f"Needs attention: {needs_summary}")
         values = {"All Listings": all_summary, "Needs Attention": needs_summary, "Last Checked": ls.timestamp(),
-                  "Scan Time": ls.format_duration(time.monotonic() - scan_started)}
+                   "Scan Time": ls.format_duration(time.monotonic() - scan_started)}
+        if responses is not None:
+            values["Responses"] = str(responses)
         values.update(buyer_columns(bool(scan and scan["counts"].get(ls.LIVE)),
-                                    owner_failed=not (scan and scan["total"])))
+                                     owner_failed=not (scan and (scan["total"] or confirmed_empty))))
+        if (target_sheet == LIVE_CHECKER_SHEET and options.checkers and scan and scan["counts"].get(ls.LIVE)
+                and not lv.visibility_targets(scan["listings"], options.limit)[0]):
+            values.update({lv.checker_column(label): "Not checked: no readable listing titles"
+                           for label, _ in options.checkers})
+            values.update({"Visibility": "NOT_CHECKED", "PK vs US": "Not compared: no searchable targets",
+                           "Visibility Details": "Live listings were counted, but no readable titles were available for buyer search."})
+            post["_visibility"] = values["Visibility"]
+            post["_visibility_cols"] = {column: values[column] for column in (
+                "PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked")}
         headline = ""
-        if scan and scan["total"]:
+        if scan and (scan["total"] or confirmed_empty):
             counts = scan["counts"]
             headline = scan["headline"]
             log(f"Full scan: {headline} ({scan['total']} listings; tabs: {scan['tabCounts']}) in "
@@ -1425,13 +1521,20 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 values["Check Result"] = ls.format_check_result("PARTIAL", "; ".join(scan["notes"]))
                 post["_live_check"] = "PARTIAL"
             else:
-                values["Check Result"] = ls.OK
-                post["_live_check"] = ls.OK
+                values["Check Result"] = ls.NO_LISTINGS if confirmed_empty else ls.OK
+                post["_live_check"] = values["Check Result"]
         else:
             values["Check Result"] = ls.format_check_result("PARTIAL", "full scan read no rows; only the first listings were saved")
             post["_live_check"] = "PARTIAL"
-        write_columns(values)
-        record_history(post["_live_check"], scan if scan and scan["total"] else None)
+            values.update({column: "" for column in (
+                "Total Listings", "Live Count", "Pending Count", "Rejected Count", "Other Count",
+                "Duplicate Count", "Duplicate Details", "Status Summary", "Listing Details")})
+            for key in ("_live_counts", "_live_listings", "_live_duplicates"):
+                post.pop(key, None)
+        if not write_columns(values):
+            post["_live_check"] = "SHEET_WRITE_FAILED"
+            raise PermanentError("Seller scan read, but Google Sheets did not confirm the result was saved.")
+        record_history(post["_live_check"], scan if scan and (scan["total"] or confirmed_empty) else None)
         set_state(AutomationState.SUCCESS)
         prefix = f"{headline}; " if headline else ""
         if post["_live_check"] == "PARTIAL":
@@ -1440,19 +1543,44 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
 
     def read_new_layout():
         """(firsts, scan) from the new table, "empty" for a table with no rows, or None."""
-        firsts = read_first_listings(page, interruptible_sleep, log, with_details=options.open_details)
-        if firsts is None:
+        try:
+            page.wait_for_selector('table[aria-label="Your listings"], ' + _OLD_CARD_SELECTOR, timeout=8000)
+            if not page.locator('table[aria-label="Your listings"]').count():
+                return None
+        except Exception:
             return None
-        if not (firsts[0] or firsts[1]):
-            return "empty"
-        return firsts, read_all_listings(page, interruptible_sleep, log)
+        if not ensure_default_listings_view(page, interruptible_sleep, log):
+            log("Cannot confirm the seller table is unfiltered.")
+            return None
+        scan = read_all_listings(page, interruptible_sleep, log)
+        if not scan:
+            return None
+        items, tab_counts, notes = scan
+        if not items:
+            # A rendered but unloaded/filtered table is not proof of zero listings.
+            if tab_counts and not notes and all(count == 0 for count in tab_counts.values()):
+                return "empty"
+            return None
+        if options.open_details:
+            firsts = read_first_listings(page, interruptible_sleep, log, with_details=True)
+        else:
+            firsts = None
+        if not firsts or not any(firsts):
+            firsts = (
+                next((row for row in items if row["tab"].lower().startswith(("active", "all listings"))), None),
+                next((row for row in items if row["tab"].lower().startswith("needs attention")), None),
+            )
+        return firsts, scan
 
     def read_old_layout(attempts):
         for attempt in range(1, attempts + 1):
             check_stop()
             firsts = read_first_listings_old_ui(page, interruptible_sleep, log, with_details=options.open_details)
             if firsts and (firsts[0] or firsts[1]):
-                return firsts, read_all_listings_old_ui(page, interruptible_sleep)
+                scan = read_all_listings_old_ui(page, interruptible_sleep)
+                if target_sheet == LIVE_CHECKER_SHEET and options.checkers:
+                    recover_old_sample_ids(page, scan[0], options.limit, interruptible_sleep, log)
+                return firsts, scan
             if attempt < attempts:
                 log(f"Listings not loaded yet (attempt {attempt}/{attempts}). Reloading...")
                 interruptible_sleep(random.uniform(1.5, 3))
@@ -1471,17 +1599,19 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
         except Exception as exc:
             raise RetryableError(f"CDP Connection failed: {exc}")
 
+        if not browser.contexts:
+            raise RetryableError("The profile's persistent browser context is not ready; no fresh context was created.")
         context = browser.contexts[0]
         page = context.new_page()
-        page.bring_to_front()
 
         try:
+            remembered_old = layout_memory.recall(profile_label) == "old"
             log("Opening Marketplace 'Your listings'...")
             try:
-                page.goto(FB_SELLER_LISTINGS, wait_until="domcontentloaded", timeout=45000)
+                page.goto(FB_MARKETPLACE_SELLING if remembered_old else FB_SELLER_LISTINGS,
+                          wait_until="domcontentloaded", timeout=20000)
             except Exception:
                 pass
-            interruptible_sleep(random.uniform(1.5, 3.5))
 
             set_state(AutomationState.PAGE_LOADING)
             if is_logged_out(page):
@@ -1492,30 +1622,24 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
             # Responses first: the Messenger badge in Facebook's top bar.
             from core.automation.fb_listing import read_messenger_unread_count
             log("Checking for new responses (Messenger badge)...")
-            responses = read_messenger_unread_count(page, interruptible_sleep)
+            responses = read_messenger_unread_count(page, interruptible_sleep, max_wait=2)
             if responses is None:
                 log("Could not find the Messenger icon, so Responses was not saved.")
             else:
                 log(f"Responses: {responses}")
-                write_columns({"Responses": str(responses)})
 
             # 1) The layout this profile showed last time (skips a 15 s wait for a table it does not have).
             # 2) New table. 3) Older cards by URL. 4) Marketplace home -> Selling link.
             result, layout_used = None, ""
-            if layout_memory.recall(profile_label) == "old":
+            if remembered_old:
                 log("Using the older 'Your listings' layout (remembered for this profile)...")
-                try:
-                    page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    pass
-                interruptible_sleep(0.5)
                 result = read_old_layout(2)
                 if result is not None:
                     layout_used = "old"
                 else:
                     log("The remembered layout did not load; checking the newer table...")
                     try:
-                        page.goto(FB_SELLER_LISTINGS, wait_until="domcontentloaded", timeout=45000)
+                        page.goto(FB_SELLER_LISTINGS, wait_until="domcontentloaded", timeout=20000)
                     except Exception:
                         pass
                     interruptible_sleep(random.uniform(1.0, 2.0))
@@ -1527,11 +1651,11 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 log("New listings table not found. Using the older 'Your listings' layout...")
                 if page.url.split("?")[0].rstrip("/") != FB_MARKETPLACE_SELLING.rstrip("/"):
                     try:
-                        page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=30000)
+                        page.goto(FB_MARKETPLACE_SELLING, wait_until="domcontentloaded", timeout=20000)
                     except Exception:
                         pass
                     interruptible_sleep(0.5)
-                result = read_old_layout(3)
+                result = read_old_layout(2)
                 if result is not None:
                     layout_used = "old"
             if result is None and open_selling_from_marketplace_home(page, interruptible_sleep, log):
@@ -1546,11 +1670,7 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                 layout_memory.remember(profile_label, layout_used)
 
             if result == "empty":
-                # Zero the counts so an old scan's numbers do not look current.
-                fail(ls.NO_LISTINGS, "the listings table is empty (this profile may have no listings)", extra={
-                    "Total Listings": 0, "Live Count": 0, "Pending Count": 0, "Rejected Count": 0,
-                    "Other Count": 0, "Duplicate Count": 0, "Status Summary": "No listings", "Listing Details": "",
-                })
+                return save_results("No listings", "None", ls.build_scan_result([]), confirmed_empty=True)
             if result is None:
                 if page.is_closed():
                     raise RetryableError("The browser page closed before listings could be read.")
@@ -1562,6 +1682,8 @@ def run_live_checker_flow(debug_url, post, logger=print, state_callback=None, st
                     logged_out=is_logged_out(page),
                     checkpoint=has_checkpoint(page),
                 )
+                if code == ls.NO_LISTINGS:
+                    code = ls.LAYOUT_UNKNOWN  # generic page text did not prove the owner's listing count
                 detail = f"could not read any listings (url {str(facts.get('url') or '?').split('?')[0]}, lang {facts.get('lang') or '?'})"
                 if facts.get("screenshot"):
                     detail += f", screenshot {os.path.basename(facts['screenshot'])}"

@@ -40,7 +40,7 @@ _RULES = (
     (REJECTED, r"looks like a duplicate|duplicate.{0,50}(?:didn.t|did not|not).{0,10}post"),
     (REJECTED, r"reject|against our|goes against|breaking our|violat|declined|not approved"),
     (ACTION_REQUIRED, r"confirm your identity|verify your identity|identity verification|identity confirmation"),
-    (REJECTED, r"needs? attention"),
+    (ACTION_REQUIRED, r"needs? attention"),
     (PENDING, r"in review|being reviewed|pending|processing|under review|awaiting"),
     (REMOVED, r"removed|deleted|taken down|unavailable"),
     (EXPIRED, r"\bexpired\b"),

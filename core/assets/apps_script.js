@@ -45,7 +45,7 @@ const LIVE_CHECK_COLUMNS = ["Total Listings", "Live Count", "Pending Count", "Re
 AUTO_COLUMNS[SHEET_FB_LISTING] = ["Response", "Responses", "Live", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS);
 // Buyer-side check from the Pakistani and USA checker accounts.
 const VISIBILITY_COLUMNS = ["PK Check", "US Check", "PK vs US", "Visibility", "Visibility Details", "Visibility Checked"];
-AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS);
+AUTO_COLUMNS[SHEET_LIVE_CHECKER] = ["Responses", "All Listings", "Needs Attention"].concat(LIVE_CHECK_COLUMNS, VISIBILITY_COLUMNS, ["Buyer Listing Targets"]);
 AUTO_COLUMNS[SHEET_RESPONSE_CHECKER] = ["Responses"];
 
 function jsonOut_(obj) {
@@ -253,10 +253,11 @@ function formatListPilotSheet_(sheet) {
     status: "Blank or Pending queues this row. Success means the owner task completed; also review Check Result and Visibility.",
     checkresult: "Owner scan quality. OK means the scan was read; it does not mean every listing is live.",
     othercount: "Listings needing identity action, sold, expired, draft, removed, or unknown. Total = Live + Pending + Rejected + Other.",
-    visibility: "Buyer sample result, not a global visibility verdict. NOT_IN_SEARCH means the link opened but the sampled search did not find it.",
+    visibility: "Buyer sample result, not a global visibility verdict. Exact listing ID in Marketplace search verifies a hit. Link opens alone does not verify search visibility. HIDDEN means the exact item page showed unavailable, not proof of a ban.",
     visibilitydetail: "Sample scope and per-listing results. Exact Facebook listing IDs are required for verified search matches. Expand this row to read the full details.",
-    pkcheck: "PK buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location.",
-    uscheck: "US buyer sample. Off means disabled. Search results depend on the account and its saved Marketplace location.",
+    pkcheck: "PK buyer sample. Only exact listing-ID hits count as in search; title+price is a possible match. Off means disabled. PK is a configured profile label, not independently verified geography.",
+    buyerlistingtarget: "Input for owner-off runs only. One line per listing: exact title | Facebook Marketplace item URL (or listing ID). Seller counts are not refreshed in this mode.",
+    uscheck: "US buyer sample. Only exact listing-ID hits count as in search; title+price is a possible match. Off means disabled. US is a configured profile label, not independently verified geography.",
     pkvsu: "Compares PK and US outcomes for each sampled listing, not just totals. Same may mean both buyers missed it. Different means observed outcomes differ. Incomplete means results are missing/unread or a buyer needs login/network recovery. Not compared means both buyers did not run. Title+price matches do not verify listing identity. Re-check profiles to populate this new column."
   };
   const numeric = new Set(["responses", "response", "totallisting", "livecount", "pendingcount", "rejectedcount", "othercount", "total", "live", "pending", "rejected"]);
@@ -292,7 +293,7 @@ function formatListPilotSheet_(sheet) {
       range.setNumberFormat("@");  // long profile/listing IDs must never become 1.2E+15
     } else if (key === "profilename" || key === "profile") {
       sheet.setColumnWidth(column, 210);
-    } else if (key.includes("detail") || key === "description") {
+    } else if (key.includes("detail") || key === "description" || key === "buyerlistingtarget") {
       sheet.setColumnWidth(column, 520);
     } else if (key === "alllisting" || key === "needsattention" || key === "statussummary") {
       sheet.setColumnWidth(column, 380);
@@ -540,6 +541,7 @@ function doPost(e) {
         if (statusIdx === -1) return jsonOut_({success: false, error: "Status column not found"});
         const pendingIdx = findExact_(headers, "Pending Count");
         const checkIdx = findExact_(headers, "Check Result");
+        const visibilityIdx = findExact_(headers, "Visibility");
 
         const data = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
         const statuses = data.map(row => [row[statusIdx]]);
@@ -561,9 +563,11 @@ function doPost(e) {
           if (status === "claimed" || isPendingStatus_(status)) return;  // running, or already queued
           const check = checkIdx === -1 ? "" : String(row[checkIdx] || "").trim();
           const pending = pendingIdx === -1 ? 0 : Number(row[pendingIdx]) || 0;
+          const visibility = visibilityIdx === -1 ? "" : String(row[visibilityIdx] || "").split(":")[0].trim().toUpperCase();
           const match = mode === "all"
               || (mode === "pending" && pending > 0)
-              || (mode === "failed" && (status.indexOf("failed") === 0 || (check !== "" && check !== "OK")));
+              || (mode === "failed" && (status.indexOf("failed") === 0 || (check !== "" && check !== "OK" && check !== "NO_LISTINGS")
+                  || ["PARTIAL", "STOPPED", "PENDING"].indexOf(visibility) !== -1));
           if (match) { statuses[i][0] = ""; reset++; }
         });
         if (reset) sheet.getRange(2, statusIdx + 1, statuses.length, 1).setValues(statuses);

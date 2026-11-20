@@ -11,6 +11,7 @@ from gui.views import fb_listing_view as fb
 from gui.views import dominancy_checker_view as dominancy
 from gui.views import response_checker_view as response
 from gui.views.live_checker_view import LiveCheckerView
+from gui.views import live_checker_view as live
 from gui.views import settings_view
 from core.automation import listing_visibility as lv
 
@@ -25,7 +26,18 @@ def dispatch(func, *args):
 def sample_posts():
     # Two rows for the same profile must remain separate in the results table.
     return [{"rowNumber": 2, "Profile Name": "Test profile"},
-            {"rowNumber": 3, "Profile Name": "Test profile"}]
+             {"rowNumber": 3, "Profile Name": "Test profile"}]
+
+
+class OwnerSummaryTests(unittest.TestCase):
+    def test_failed_scans_are_not_reported_as_no_listings(self):
+        self.assertIn("unknown", live._owner_summary({}, {"LAYOUT_UNKNOWN": 2}))
+        self.assertNotIn("No listings", live._owner_summary({}, {"LAYOUT_UNKNOWN": 2}))
+        self.assertEqual(live._owner_summary({}, {}), "No listings")
+
+    def test_partial_totals_are_explicit(self):
+        self.assertIn("incomplete", live._owner_summary({"LIVE": 3}, {"PARTIAL": 1}))
+        self.assertEqual(live._owner_summary({"LIVE": 3}, {}), "3 LIVE")
 
 
 class DashboardTests(unittest.TestCase):
@@ -218,15 +230,44 @@ class DashboardTests(unittest.TestCase):
         with mock.patch.object(settings_view, "get_setting", side_effect=lambda key, default=None: values.get(key, default)), \
              mock.patch.object(settings_view, "set_setting") as save:
             view = self.make_view(settings_view.SettingsView)
+            view.owner_enabled_var.set(False)
             view.buyers_enabled_var.set(False)
             view._update_buyer_controls()
             self.assertEqual(view.pk_checker_entry.cget("state"), "disabled")
             view.on_save()
             saved = dict(call.args for call in save.call_args_list)
         self.assertFalse(saved["live_check_buyers_enabled"])
+        self.assertFalse(saved["live_check_owner_enabled"])
         self.assertEqual(saved["live_check_pk_profile"], "pk-id")
         self.assertEqual(saved["live_check_us_profile"], "us-id")
         self.assertEqual(saved["live_check_sample_size"], 3)
+
+    def test_buyer_only_claims_valid_rows_without_running_the_owner_engine(self):
+        view = self.make_view(LiveCheckerView)
+        view.run_options = lv.BuyerOptions(owner_enabled=False, pk_profile="pk")
+        valid = {"rowNumber": 2, "profileName": "Seller", "Live Count": 99,
+                 lv.BUYER_TARGETS_COLUMN: "Chair | 123"}
+        invalid = {"rowNumber": 3, lv.BUYER_TARGETS_COLUMN: "guess by title"}
+        logs = []
+
+        def check_buyer(posts, *_args):
+            self.assertEqual(posts, [valid])
+            self.assertEqual(valid["_buyer_targets"], [{"title": "Chair", "listingId": "123"}])
+            valid.update(_visibility="OK", _visibility_saved=True)
+
+        with mock.patch.object(live, "run_on_ui", side_effect=dispatch), \
+             mock.patch.object(view, "_ensure_browser_ready", return_value=True), \
+             mock.patch.object(view, "_run_visibility_pass", side_effect=check_buyer), \
+             mock.patch.object(live, "claim_row", return_value=(True, "Claimed")) as claim, \
+             mock.patch.object(live, "update_row_status", return_value=(True, "OK")) as status, \
+             mock.patch.object(live, "GroupedAutomationEngine") as engine:
+            view._run_buyers_only([valid, invalid], logs.append, self.root)
+        claim.assert_called_once_with("Live Checker", 2)
+        engine.assert_not_called()
+        status.assert_called_once_with("Live Checker", 2, "Success: buyer-only check")
+        self.assertEqual(view.table.rows[2]["values"]["Live"], "—")
+        self.assertEqual(valid["Live Count"], 99)
+        self.assertTrue(any("Row 3 left pending" in line for line in logs))
 
     def test_all_three_engine_callbacks_update_dashboard(self):
         specs = (

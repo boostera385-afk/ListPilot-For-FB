@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 from core.automation import listing_status as ls
+from core.automation import listing_visibility as lv
 from core.utils import layout_memory
 from core.engine.exceptions import PermanentError, RetryableError
 
@@ -49,11 +50,12 @@ SCENARIOS = {
             ("active", "Active", _active(60)[:57] + [_row(57, "Fresh one", "In review"),
                                                        _row(58, "Fresh two", "In review"),
                                                        _row(59, "Fresh three", "In review")]),
-            ("needs_attention", "Needs attention", [_row(100 + i, f"Rejected {i}", "Active") for i in range(3)]),
+            ("needs_attention", "Needs attention", [_row(100 + i, f"Rejected {i}", "Rejected") for i in range(3)]),
             ("sold", "Sold", [_row(200 + i, f"Sold item {i}", "Sold") for i in range(2)]),
         ],
     },
     "empty": {"tabs": [("active", "Active", [])]},
+    "unloaded": {"tabs": [("active", "Active", [])], "badge_count": 3},
     "stubborn_tab": {
         "tabs": [
             ("active", "Active", _active(4)),
@@ -127,7 +129,7 @@ def _build_page(name):
         payload = {"tabs": [], "broken_tabs": []}
     else:
         tabs_html = "".join(
-            f'<div role="tab" id="{tid}" aria-selected="false">{label}{f" ({len(rows)})" if rows else " (0)"}</div>'
+            f'<div role="tab" id="{tid}" aria-selected="false">{label} ({cfg.get("badge_count", len(rows))})</div>'
             for tid, label, rows in cfg["tabs"]
         )
         # A (0) badge on an empty Active tab would be skipped; show the real table anyway.
@@ -154,7 +156,7 @@ BUYER_SEARCH = {  # query -> [(listing id, price, title)] shown to the buyer
     "Fence paint": [("901", "$9", "Fence paint kit")],
     "Hedge trim": [("700", "$50", "Hedge trim"), ("701", "$50", "Hedge trim")],
 }
-BUYER_ITEMS = {"222": "Deck stain - $40", "333": "This listing isn't available"}
+BUYER_ITEMS = {"222": "Deck stain", "333": "This listing isn't available"}
 
 
 # --- Fake older "Your listings" page: cards load in slow batches as you scroll (infinite feed) ---
@@ -308,27 +310,29 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         shutil.rmtree(cls.profile_dir, ignore_errors=True)
 
     # -- helpers ---------------------------------------------------------------
-    def run_flow(self, scenario, post=None):
+    def run_flow(self, scenario, post=None, write_ok=True):
         from core.automation import live_checker as lc
 
         writes, history = [], []
 
         def fake_update(sheet, row, values):
             writes.append(dict(values))
-            return True, "ok"
+            return write_ok, "ok" if write_ok else "network unavailable"
 
         def fake_history(profile, **kwargs):
             history.append({"profile": profile, **kwargs})
             return True, "ok"
 
         post = post if post is not None else {"rowNumber": 5, "profileName": f"virtual-{scenario}"}
+        # Owner-only fixtures must not inherit real checker accounts from config.json.
+        post.setdefault("_buyer_options", lv.BuyerOptions(enabled=False))
         logs = []
         url = f"{self.base}/{scenario}/marketplace/seller/listings/"
         with mock.patch.object(lc, "FB_SELLER_LISTINGS", url), \
                 mock.patch.object(lc, "update_column_values", fake_update), \
                 mock.patch.object(lc, "append_live_history", fake_history), \
                 mock.patch.object(lc.random, "uniform", lambda a, b: a * 0.4), \
-                mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep: 2), \
+                 mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep, **kwargs: 2), \
                 mock.patch.object(layout_memory, "_PATH", os.path.join(self.profile_dir, "layout_memory.json")), \
                 mock.patch.object(lc, "DEBUG_DIR", os.path.join(self.profile_dir, "debug")):
             outcome, error = None, None
@@ -361,13 +365,33 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
 
     def test_empty_table_zeroes_counts(self):
         outcome, error, sheet, history, logs, post = self.run_flow("empty")
-        self.assertIsInstance(error, PermanentError)
-        self.assertTrue(str(error).startswith(ls.NO_LISTINGS))
+        self.assertIsNone(error)
+        self.assertTrue(outcome[0])
         self.assertEqual(sheet["Total Listings"], 0)
         self.assertEqual(sheet["Live Count"], 0)
         self.assertEqual(sheet["Other Count"], 0)
         self.assertEqual(sheet["Listing Details"], "")
         self.assertTrue(sheet["Check Result"].startswith(ls.NO_LISTINGS))
+        self.assertEqual(history[0]["live"], 0)
+        self.assertNotIn("seller scan failed", sheet.get("PK Check", ""))
+
+    def test_read_but_unsaved_results_are_not_reported_as_success(self):
+        outcome, error, sheet, history, logs, post = self.run_flow("empty", write_ok=False)
+        self.assertIsInstance(error, PermanentError)
+        self.assertIsNone(outcome)
+        self.assertEqual(post["_live_check"], "SHEET_WRITE_FAILED")
+        self.assertEqual(history, [])
+
+    def test_unloaded_table_is_not_reported_as_zero_listings(self):
+        from core.automation import live_checker as lc
+        post = {"rowNumber": 5, "profileName": "unloaded", "_live_retried": True}
+        with mock.patch.object(lc, "read_first_listings_old_ui", return_value=None), \
+             mock.patch.object(lc, "open_selling_from_marketplace_home", return_value=False), \
+             mock.patch.object(lc, "FB_MARKETPLACE_SELLING", self.base + "/unloaded/marketplace/seller/listings/"):
+            outcome, error, sheet, history, logs, post = self.run_flow("unloaded", post)
+        self.assertIsInstance(error, PermanentError)
+        self.assertEqual(sheet["Total Listings"], "")
+        self.assertNotIn(ls.NO_LISTINGS, sheet["Check Result"])
 
     def test_tab_that_cannot_open_gives_partial(self):
         outcome, error, sheet, history, logs, post = self.run_flow("stubborn_tab")
@@ -399,7 +423,7 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
             results = vc.check_listings(self.debug_url, "PK", targets, logs.append, lambda seconds: None)
         self.assertEqual(results, [lv.SEARCH, lv.TEXT_MATCH, lv.NOT_FOUND, lv.LINK_ONLY, lv.HIDDEN], logs[-6:])
         self.assertEqual(lv.summarize_checker(results),
-                         "2/5 in search, 1 by title+price, 1 link only, 1 not found, 1 unavailable")
+                         "1/5 in search, 1 possible by title+price, 1 link only, 1 no match (no ID), 1 item unavailable")
         self.assertTrue(lv.overall_visibility({"PK": results}).startswith("HIDDEN"))
 
     def test_identical_listings_without_ids_need_one_result_card_each(self):
@@ -415,7 +439,7 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
                                         logs.append, lambda seconds: None)
         # One card cannot prove two identical listings; two cards prove two, not three.
         self.assertEqual(results, [lv.TEXT_MATCH, lv.NOT_FOUND, lv.TEXT_MATCH, lv.TEXT_MATCH, lv.NOT_FOUND], logs[-6:])
-        self.assertTrue(any("not in search (saw:" in line for line in logs))
+        self.assertTrue(any("not seen in sampled search (saw:" in line for line in logs))
         # Repeated listings share one page load per search: 5 targets, 2 distinct searches.
         self.assertEqual(sorted(SEARCH_HITS), ["Gutter clean", "Hedge trim"])
 
@@ -445,7 +469,8 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
         writes = []
         logs = []
         memory = os.path.join(self.profile_dir, "layout_memory_flow.json")
-        post = {"rowNumber": 6, "profileName": "remembered-old"}
+        post = {"rowNumber": 6, "profileName": "remembered-old",
+                "_buyer_options": lv.BuyerOptions(enabled=False)}
         layout_memory.remember("remembered-old", "old", path=memory)
         with mock.patch.object(layout_memory, "_PATH", memory), \
                 mock.patch.object(lc, "FB_SELLER_LISTINGS", self.base + "/mixed/marketplace/seller/listings/"), \
@@ -453,7 +478,7 @@ class VirtualLiveCheckerFlow(unittest.TestCase):
                 mock.patch.object(lc, "update_column_values", lambda sheet, row, values: writes.append(dict(values)) or (True, "ok")), \
                 mock.patch.object(lc, "append_live_history", lambda *a, **k: (True, "ok")), \
                 mock.patch.object(lc.random, "uniform", lambda a, b: a * 0.4), \
-                mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep: 0), \
+                 mock.patch("core.automation.fb_listing.read_messenger_unread_count", lambda page, sleep, **kwargs: 0), \
                 mock.patch.object(lc, "DEBUG_DIR", os.path.join(self.profile_dir, "debug")):
             started = _time.monotonic()
             lc.run_live_checker_flow(self.debug_url, post, logger=logs.append)

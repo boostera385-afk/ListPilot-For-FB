@@ -6,7 +6,7 @@ browser or network access here, so everything is unit tested.
 """
 import re
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from core.utils.smart_match import loose_key
 from core.automation import listing_status as ls
@@ -44,6 +44,7 @@ class BuyerOptions:
     us_profile: str = ""
     limit: int = DEFAULT_SAMPLE_SIZE
     open_details: bool = False
+    owner_enabled: bool = True
 
     @classmethod
     def from_settings(cls, settings):
@@ -60,6 +61,7 @@ class BuyerOptions:
             pk_profile=str(settings.get("live_check_pk_profile") or "").strip(),
             us_profile=str(settings.get("live_check_us_profile") or "").strip(),
             limit=limit, open_details=flag("live_check_open_details", False),
+            owner_enabled=flag("live_check_owner_enabled"),
         )
 
     @property
@@ -72,6 +74,7 @@ class BuyerOptions:
 
 FB_SEARCH = "https://www.facebook.com/marketplace/search/?query={query}&exact=false"
 FB_ITEM = "https://www.facebook.com/marketplace/item/{id}/"
+BUYER_TARGETS_COLUMN = "Buyer Listing Targets"
 
 _UNAVAILABLE = (
     "this listing isn't available",
@@ -115,12 +118,11 @@ def owner_buyer_columns(options, has_live=False, owner_failed=False):
 
 def visibility_targets(listings, limit=MAX_TARGETS_PER_PROFILE):
     """LIVE listings with a title, at most ``limit``, as ``(targets, skipped)``."""
-    live = [
-        {"title": _clean(item.get("title")), "listingId": _clean(item.get("listingId")),
-         "price": _clean(item.get("price"))}
-        for item in listings or []
-        if (item or {}).get("state") == ls.LIVE and _clean(item.get("title"))
-    ]
+    all_live = [item for item in listings or [] if (item or {}).get("state") == ls.LIVE]
+    live = [{"title": _clean(item.get("title")), "listingId": _clean(item.get("listingId")),
+             "price": _clean(item.get("price")),
+             **({"cardId": item["cardId"]} if item.get("cardId") else {})}
+            for item in all_live if _clean(item.get("title"))]
     # Prefer exact listing IDs (a shared service title cannot identify its owner), then
     # different services before repeats of one, so a small sample covers more than one title.
     seen, repeat = set(), {}
@@ -130,11 +132,54 @@ def visibility_targets(listings, limit=MAX_TARGETS_PER_PROFILE):
         seen.add(key)
     order = sorted(range(len(live)), key=lambda index: (not live[index]["listingId"], repeat[index]))
     live = [live[index] for index in order]
-    return live[:limit], max(0, len(live) - limit)
+    return live[:limit], len(all_live) - min(limit, len(live))
+
+
+def parse_buyer_targets(value):
+    """Explicit buyer-only input. Reject malformed lines rather than guessing an ID."""
+    targets = {}
+    for number, line in enumerate(str(value or "").splitlines(), 1):
+        if not line.strip():
+            continue
+        title, separator, reference = line.rpartition("|")
+        reference = reference.strip()
+        listing_id = reference if re.fullmatch(r"[0-9]+", reference) else ""
+        if not listing_id:
+            try:
+                url = urlsplit(reference)
+                if (url.scheme == "https" and url.netloc.lower() in
+                        {"facebook.com", "www.facebook.com", "m.facebook.com"}):
+                    listing_id = item_id_from_href(reference)
+            except ValueError:
+                pass
+        if not separator or not _clean(title) or not listing_id:
+            raise ValueError(f"Line {number}: use title | Facebook Marketplace item URL or listing ID.")
+        target = {"title": _clean(title), "listingId": listing_id}
+        if listing_id in targets and targets[listing_id] != target:
+            raise ValueError(f"Line {number}: the listing ID already has a different title.")
+        targets[listing_id] = target
+    return list(targets.values())
 
 
 def search_url(title):
     return FB_SEARCH.format(query=quote(_clean(title)[:100]))
+
+
+def search_queries(target):
+    """Bounded title + service-keyword plan; keywords never establish identity or geography."""
+    title = _clean(target.get("title"))[:100]
+    if not title:
+        return []
+    noise = {"a", "an", "and", "the", "for", "of", "in", "to", "with", "near", "me",
+             "service", "services", "professional", "affordable", "best", "quality",
+             "call", "text", "us", "free", "estimate", "estimates"}
+    words = []
+    for word in re.findall(r"[^\W_]+", title.casefold()):
+        if word in noise or (word.isdigit() and len(word) >= 7) or word in words:
+            continue
+        words.append(word)
+    keywords = " ".join(words[:6])
+    return [title, keywords] if keywords and keywords.casefold() != title.casefold() else [title]
 
 
 def item_url(listing_id):
@@ -142,13 +187,26 @@ def item_url(listing_id):
 
 
 def item_id_from_href(href):
-    match = re.search(r"/marketplace/item/(\d+)", str(href or ""))
+    try:
+        url = urlsplit(str(href or ""))
+    except ValueError:
+        return ""
+    if url.netloc and url.hostname not in ("facebook.com", "www.facebook.com", "m.facebook.com"):
+        return ""
+    match = re.fullmatch(r"/marketplace/item/([0-9]+)/?", url.path)
     return match.group(1) if match else ""
 
 
-def _title_in(title, text):
-    key = loose_key(title)
-    return bool(key) and key in loose_key(text)
+def matches_search_page(requested_url, current_url):
+    """Require the requested query on a Marketplace search route, allowing a city redirect."""
+    try:
+        wanted, actual = urlsplit(requested_url), urlsplit(current_url)
+        query = parse_qs(wanted.query).get("query")
+        return bool(query and actual.scheme == wanted.scheme and actual.netloc == wanted.netloc
+                    and re.search(r"/marketplace/(?:[^/]+/)?search/?$", actual.path)
+                    and parse_qs(actual.query).get("query") == query)
+    except ValueError:
+        return False
 
 
 def found_in_search(results, target):
@@ -209,9 +267,9 @@ def describe_results(results, limit=3):
 def state_label(state):
     """Plain words for one buyer result (used in the app's Buyer checks tab)."""
     return {
-        SEARCH: "In search", TEXT_MATCH: "In search (title + price)",
-        LINK_ONLY: "Link opens, not in search", NOT_FOUND: "Not in search",
-        HIDDEN: "Unavailable", UNCLEAR: "Not verified", ERROR: "Error",
+        SEARCH: "In search (exact ID)", TEXT_MATCH: "Possible match (title + price)",
+        LINK_ONLY: "Link opens; not seen in sampled search", NOT_FOUND: "No match in sampled search (no ID)",
+        HIDDEN: "Item page unavailable", UNCLEAR: "Not verified", ERROR: "Error",
         LOGIN_REQUIRED: "Login needed", CHECKPOINT: "Account check needed",
         NETWORK_ERROR: "Connection interrupted",
     }.get(state, str(state))
@@ -222,18 +280,20 @@ def listing_verdict(states):
     states = list(states)
     if not states:
         return "Not checked"
-    found = [s for s in states if s in (SEARCH, TEXT_MATCH)]
-    missed = [s for s in states if s in (LINK_ONLY, NOT_FOUND)]
-    unchecked = [s for s in states if s in UNVERIFIED_STATES]
+    found = SEARCH in states
+    missed = LINK_ONLY in states
+    unchecked = any(s in (*UNVERIFIED_STATES, TEXT_MATCH, NOT_FOUND) for s in states)
     if HIDDEN in states:
-        return "Hidden from a buyer"
+        return "Item unavailable to a buyer"
     note = " (a buyer could not check)" if unchecked else ""
     if found and not missed:
-        return ("Visible in search" if SEARCH in found else "Visible (title + price)") + note
+        return "Visible in search" + note
     if found:
         return "Visible to some buyers"
     if missed:
-        return "Not in search" + note
+        return "Not seen in sampled search" + note
+    if TEXT_MATCH in states:
+        return "Possible title + price match"
     return "Not verified"
 
 
@@ -245,18 +305,18 @@ def summarize_buyer_rows(rows):
     counts = {"visible": 0, "some": 0, "not": 0, "hidden": 0, "unverified": 0}
     for row in rows:
         verdict = listing_verdict([row[label] for label in ("PK", "US") if label in row])
-        if verdict.startswith("Visible in search") or verdict.startswith("Visible (title"):
+        if verdict.startswith("Visible in search"):
             counts["visible"] += 1
         elif verdict == "Visible to some buyers":
             counts["some"] += 1
-        elif verdict.startswith("Hidden"):
+        elif verdict.startswith("Item unavailable"):
             counts["hidden"] += 1
-        elif verdict.startswith("Not in search"):
+        elif verdict.startswith("Not seen"):
             counts["not"] += 1
         else:
             counts["unverified"] += 1
-    words = (("visible", "found by at least one buyer"), ("some", "visible to some buyers"), ("not", "not in search"),
-             ("hidden", "hidden"), ("unverified", "not verified"))
+    words = (("visible", "found by at least one buyer"), ("some", "visible to some buyers"), ("not", "not seen in sampled search"),
+             ("hidden", "item unavailable"), ("unverified", "not verified"))
     parts = [f"{len(rows)} listing{'s' if len(rows) != 1 else ''} checked"]
     parts += [f"{counts[key]} {word}" for key, word in words if counts[key]]
     incomplete = sum(any(row.get(label) in UNVERIFIED_STATES for label in ("PK", "US")) for row in rows)
@@ -269,14 +329,20 @@ def summarize_buyer_rows(rows):
     return "Buyer sample: " + " · ".join(parts)
 
 
-def classify_item_page(url, body_text, title):
-    """SEARCH-fallback result for the listing's own page: LINK_ONLY, HIDDEN or UNCLEAR."""
-    lowered = _clean(body_text).lower()
-    if any(phrase in lowered for phrase in _UNAVAILABLE):
+def classify_item_page(url, headings, title, requested_url):
+    """Verify exact route/ID and item heading, never arbitrary body text or redirected errors."""
+    try:
+        actual, expected = urlsplit(url), urlsplit(requested_url)
+    except ValueError:
+        return UNCLEAR
+    if (actual.scheme, actual.netloc, actual.path.rstrip("/")) != (
+        expected.scheme, expected.netloc, expected.path.rstrip("/")
+    ):
+        return UNCLEAR
+    clean_headings = [_clean(value).casefold().rstrip(".") for value in headings]
+    if any(value in _UNAVAILABLE for value in clean_headings):
         return HIDDEN
-    if "/marketplace/item/" not in str(url or ""):
-        return UNCLEAR  # A redirect/loading failure is not proof the listing is hidden.
-    if _title_in(title, body_text):
+    if _clean(title).casefold() in clean_headings:
         return LINK_ONLY
     return UNCLEAR
 
@@ -289,10 +355,10 @@ def summarize_checker(results):
     counts = {}
     for state in results:
         counts[state] = counts.get(state, 0) + 1
-    parts = [f"{counts.get(SEARCH, 0) + counts.get(TEXT_MATCH, 0)}/{total} in search"]
+    parts = [f"{counts.get(SEARCH, 0)}/{total} in search"]
     if counts.get(TEXT_MATCH):
-        parts.append(f"{counts[TEXT_MATCH]} by title+price")
-    for state, word in ((LINK_ONLY, "link only"), (NOT_FOUND, "not found"), (HIDDEN, "unavailable"),
+        parts.append(f"{counts[TEXT_MATCH]} possible by title+price")
+    for state, word in ((LINK_ONLY, "link only"), (NOT_FOUND, "no match (no ID)"), (HIDDEN, "item unavailable"),
                         (UNCLEAR, "unverified"), (ERROR, "error"), (LOGIN_REQUIRED, "login needed"),
                         (CHECKPOINT, "account check needed"), (NETWORK_ERROR, "connection interrupted")):
         if counts.get(state):
@@ -304,7 +370,7 @@ def compare_regions(per_checker, expected=None):
     """Compare the same listing positions, never just the two aggregate counts.
 
     Same means matching observed outcomes, not that a listing is visible.
-    Title+price hits have the same search outcome as ID hits, but remain unverified.
+    Title+price hits and misses without an ID cannot verify regional agreement.
     Missing/error results take precedence over observed differences.
     """
     if "PK" not in per_checker or "US" not in per_checker:
@@ -315,8 +381,7 @@ def compare_regions(per_checker, expected=None):
         return "Incomplete: buyer sample sizes differ"
     if not total:
         return "Not compared: no sampled listings"
-    outcomes = {SEARCH: "IN_SEARCH", TEXT_MATCH: "IN_SEARCH",
-                LINK_ONLY: LINK_ONLY, NOT_FOUND: NOT_FOUND, HIDDEN: HIDDEN}
+    outcomes = {SEARCH: SEARCH, LINK_ONLY: LINK_ONLY, HIDDEN: HIDDEN}
     same = different = unverified = 0
     for index in range(total):
         left = outcomes.get(pk[index]) if index < len(pk) else None
@@ -350,10 +415,10 @@ def overall_visibility(per_checker):
     hidden = sum(1 for s in states if s == HIDDEN)
     if hidden:
         return f"HIDDEN: {hidden} result(s)"
-    link_only = sum(1 for s in states if s in (LINK_ONLY, NOT_FOUND))
+    link_only = states.count(LINK_ONLY)
     if link_only:
         return f"NOT_IN_SEARCH: {link_only} result(s)"
-    gaps = sum(1 for s in states if s in UNVERIFIED_STATES)
+    gaps = sum(1 for s in states if s != SEARCH and s != TEXT_MATCH)
     if gaps:
         return f"PARTIAL: {gaps} result(s) not checked"
     text_only = sum(1 for s in states if s == TEXT_MATCH)
@@ -380,28 +445,32 @@ def format_visibility_details(targets, per_checker, max_chars=45000):
 
 def visibility_label(code):
     return {
-        "OK": "Found in search", "NOT_IN_SEARCH": "Link opens; not in search",
-        "HIDDEN": "Unavailable to buyer", "PARTIAL": "Sample / incomplete",
+        "OK": "Found in search", "NOT_IN_SEARCH": "Link opens; not seen in sample",
+        "HIDDEN": "Item page unavailable", "PARTIAL": "Sample / incomplete",
         "NOT_CHECKED": "Not checked", "SKIPPED": "Buyer checks off", "STOPPED": "Stopped",
         "PENDING": "Waiting for buyers",
     }.get(str(code).split(":")[0], str(code))
 
 
-def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None):
+def row_columns(targets, per_checker, skipped=0, disabled=(), elapsed=None, owner_scanned=True):
     """Sheet values for one owner row after both checkers ran."""
     values = {checker_column(label): summarize_checker(results) for label, results in per_checker.items()}
     for label in disabled:
         values[checker_column(label)] = "Off"
     values["PK vs US"] = compare_regions(per_checker, expected=len(targets))
-    result = overall_visibility(per_checker)
+    result = overall_visibility({label: [states[i] if i < len(states) else UNCLEAR
+                                          for i in range(len(targets))]
+                                 for label, states in per_checker.items()})
     if skipped and result == ls.OK:
         result = f"PARTIAL: {skipped} listing(s) outside this sample"
     values["Visibility"] = result
-    scope = f"Sample: {len(targets)} of {len(targets) + skipped} live listings per enabled buyer."
+    source = "live listings" if owner_scanned else "provided targets (owner scan off; seller status not checked)"
+    scope = f"Sample: {len(targets)} of {len(targets) + skipped} {source} per enabled buyer."
     if skipped:
         scope += f" {skipped} not checked."
     scope += " Search results depend on the buyer account and Marketplace location."
-    scope += " 'In search' = found by searching Marketplace as a buyer; 'link only' = opens by link but is not in search."
+    scope += " Search uses the title, then a keyword fallback when different. Saved city/radius is not changed or independently verified."
+    scope += " 'In search' requires the exact listing ID. 'Link only' opens by link but was not seen in sampled search results."
     scope += f" PK vs US: {values['PK vs US']}. Matching results do not necessarily mean visible listings."
     if elapsed is not None:
         scope += f" Buyer check took {ls.format_duration(elapsed)}."

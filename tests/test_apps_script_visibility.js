@@ -64,6 +64,7 @@ const us = headers.indexOf("US Check");
 assert.ok(us > 0);
 assert.equal(headers[us + 1], "PK vs US");
 assert.equal(headers[us + 2], "Visibility");
+assert.ok(headers.includes("Buyer Listing Targets"), "buyer-only mode needs explicit target input");
 context.ensureAutoColumns_(fresh);
 assert.deepEqual(fresh.rows[0], headers, "setup is idempotent");
 
